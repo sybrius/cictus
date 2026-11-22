@@ -1,5 +1,7 @@
 import sql from 'mssql';
 import { z } from 'zod';
+import dns from 'node:dns/promises';
+import net from 'node:net';
 
 /** Connection settings supplied by the wizard (never stored server-side
  *  beyond the request that uses them). */
@@ -10,6 +12,7 @@ export const SqlServerConfigSchema = z.object({
   password: z.string().min(1, 'Password is required'),
   database: z.string().min(1, 'Database is required'),
   trustCert: z.boolean().default(true),
+  encrypt: z.boolean().default(true),
   instance: z.string().optional(),
 });
 
@@ -70,21 +73,110 @@ export interface DatabaseSchema {
   views: ViewInfo[];
 }
 
-function toConfig(cfg: SqlServerConfig): sql.config {
+function toConfig(cfg: SqlServerConfig, encryptOverride?: boolean): sql.config {
+  const encrypt = encryptOverride ?? cfg.encrypt ?? true;
   return {
     server: cfg.host,
-    port: cfg.port,
+    // When a named instance is given, tedious resolves its port via the
+    // SQL Browser (UDP 1434). Sending an explicit port as well makes
+    // tedious ignore the instance lookup, so omit it in that case.
+    ...(cfg.instance ? {} : { port: cfg.port }),
     user: cfg.user,
     password: cfg.password,
     database: cfg.database,
     options: {
-      encrypt: true,
+      encrypt,
       trustServerCertificate: cfg.trustCert,
       ...(cfg.instance ? { instanceName: cfg.instance } : {}),
     },
     pool: { max: 5, min: 0, idleTimeoutMillis: 30_000 },
     connectionTimeout: 15_000,
     requestTimeout: 120_000,
+  };
+}
+
+/** Plain-English explanation for the cryptic tedious/mssql errors.
+ *  "Could not connect (sequence)" is the pre-login handshake failing:
+ *  TCP opened (or was reset) but SQL Server never completed login —
+ *  almost always TCP/IP disabled, a named instance on a dynamic port,
+ *  the service stopped, a firewall, or a TLS handshake failure. */
+export function explainSqlServerError(err: unknown): string {
+  const e = err as { code?: string; message?: string; originalError?: { code?: string } };
+  const msg = e?.message ?? String(err);
+  const code = e?.code ?? e?.originalError?.code ?? '';
+  if (/could not connect \(sequence\)/i.test(msg) || code === 'ESOCKET') {
+    return (
+      `${msg} — the pre-login handshake failed. ` +
+      `This usually means: (1) SQL Server is not listening on that host:port — ` +
+      `check SQL Server Configuration Manager → SQL Server Network Configuration → ` +
+      `Protocols → TCP/IP is Enabled, IPAll TCP Port is 1433, and the service was restarted; ` +
+      `(2) it is a named instance (e.g. QYLA\\SQLEXPRESS) on a dynamic port, not 1433 — ` +
+      `put SQLEXPRESS in the Instance field and leave Port blank, and make sure the ` +
+      `SQL Server Browser service is running; (3) the service is stopped or Windows ` +
+      `Firewall is blocking 1433 — test with: Test-NetConnection QYLA -Port 1433; ` +
+      `(4) TLS: the app first tries encryption on, then retries with it off — if the ` +
+      `retry also fails, it is not a TLS problem. Try Host "localhost" instead of "QYLA" ` +
+      `if the app runs on the same PC.`
+    );
+  }
+  if (code === 'ECONNREFUSED' || /ECONNREFUSED/i.test(msg)) {
+    return `${msg} — nothing is listening on that host:port. SQL Server is stopped, TCP/IP is disabled, or it listens on a different (dynamic) port. See the TCP/IP / named-instance checks above.`;
+  }
+  if (code === 'ENOTFOUND' || /ENOTFOUND|getaddrinfo/i.test(msg)) {
+    return `${msg} — the host name "${''}" could not be resolved. If the app runs on the same PC as SQL Server, use "localhost" or "127.0.0.1" instead of the PC name; if it runs in Docker/WSL, use the PC's IP address or host.docker.internal.`;
+  }
+  if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
+    return `${msg} — no reply within 15s. The host may be unreachable, the port blocked by a firewall, or SQL Server is starting up. Test with: Test-NetConnection <host> -Port <port>.`;
+  }
+  if (code === 'ELOGIN' || /login failed/i.test(msg)) {
+    return `${msg} — the server answered, but the login was rejected. Check the username/password, that SQL Server authentication (not only Windows auth) is enabled, and that the login has access to the database.`;
+  }
+  return msg;
+}
+
+/** Step-by-step network diagnosis, without attempting a login.
+ *  Lets the UI tell the user whether DNS, TCP:1433, or the login itself failed. */
+export async function diagnoseSqlServer(cfg: SqlServerConfig): Promise<{
+  dns: { ok: boolean; address?: string; error?: string };
+  tcp: { ok: boolean; error?: string };
+  hint: string;
+}> {
+  let dnsResult: { ok: boolean; address?: string; error?: string } = { ok: false };
+  try {
+    const addrs = await dns.lookup(cfg.host);
+    dnsResult = { ok: true, address: addrs.address };
+  } catch (err) {
+    dnsResult = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      dns: dnsResult,
+      tcp: { ok: false, error: 'Skipped — DNS failed' },
+      hint: `Host "${cfg.host}" does not resolve from where the app is running. If the app runs on the same PC as SQL Server, use "localhost" or "127.0.0.1". If it runs in Docker/WSL, use the PC's LAN IP or host.docker.internal.`,
+    };
+  }
+
+  const port = cfg.instance ? 1434 : cfg.port;
+  const tcp: { ok: boolean; error?: string } = await new Promise((resolve) => {
+    const socket = new net.Socket();
+    const timer = setTimeout(() => { socket.destroy(); resolve({ ok: false, error: 'Timed out after 5s — port is filtered or the host is unreachable' }); }, 5000);
+    socket.once('error', (err) => { clearTimeout(timer); resolve({ ok: false, error: err.message }); });
+    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve({ ok: true }); });
+    socket.connect(cfg.instance ? 1434 : cfg.port, cfg.host);
+  });
+  void port;
+
+  if (!tcp.ok) {
+    return {
+      dns: dnsResult,
+      tcp,
+      hint: cfg.instance
+        ? `Could not reach the SQL Browser on ${cfg.host}:1434 (${tcp.error}). The Browser service must be running for a named instance, or use the instance's actual TCP port instead of the instance name.`
+        : `Could not open TCP ${cfg.host}:${cfg.port} (${tcp.error}). SQL Server is not listening there — enable TCP/IP in SQL Server Configuration Manager, set IPAll TCP Port to ${cfg.port}, restart the SQL Server service, and allow ${cfg.port} through Windows Firewall. Test from PowerShell: Test-NetConnection ${cfg.host} -Port ${cfg.port}`,
+    };
+  }
+  return {
+    dns: dnsResult,
+    tcp,
+    hint: `DNS and TCP ${cfg.host}:${cfg.port} both work, so the network path is fine — the failure is at login / TLS. Check the username/password, SQL Server authentication mode, and try with "Use encryption" off.`,
   };
 }
 
@@ -107,23 +199,42 @@ export async function testSqlServerConnection(cfg: SqlServerConfig): Promise<{
   version?: string;
   database?: string;
   error?: string;
+  encryption?: string;
 }> {
-  try {
-    return await withSqlServer(cfg, async (pool) => {
-      const r = await pool
-        .request()
-        .query<{ version: string; db: string }>(
-          'SELECT @@VERSION AS version, DB_NAME() AS db',
-        );
-      return {
-        ok: true,
-        version: r.recordset[0]?.version?.split('\n')[0],
-        database: r.recordset[0]?.db,
-      };
-    });
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  // Try the requested encryption setting first; if the pre-login / TLS
+  // handshake fails ("Could not connect (sequence)"), retry with
+  // encryption off — local SQL Server with a self-signed cert is the
+  // most common cause, and the retry distinguishes TLS from TCP failure.
+  const attempts: (boolean | undefined)[] = cfg.encrypt === false ? [false] : [undefined, false];
+  let lastError: unknown = null;
+  for (const encryptOverride of attempts) {
+    try {
+      const pool = new sql.ConnectionPool(toConfig(cfg, encryptOverride));
+      try {
+        await pool.connect();
+        const r = await pool
+          .request()
+          .query<{ version: string; db: string }>(
+            'SELECT @@VERSION AS version, DB_NAME() AS db',
+          );
+        return {
+          ok: true,
+          version: r.recordset[0]?.version?.split('\n')[0],
+          database: r.recordset[0]?.db,
+          encryption: encryptOverride === false ? 'off (encryption disabled — retry succeeded)' : 'on',
+        };
+      } finally {
+        await pool.close().catch(() => undefined);
+      }
+    } catch (err) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      // Only a handshake/TLS failure is worth retrying unencrypted.
+      if (!/could not connect \(sequence\)/i.test(msg) && (err as { code?: string })?.code !== 'ESOCKET') break;
+      if (encryptOverride === false) break;
+    }
   }
+  return { ok: false, error: explainSqlServerError(lastError) };
 }
 
 const SCHEMA_SQL = `

@@ -99,11 +99,60 @@ own pool and closes it afterwards.
   violates a FK will fail its batch. If you hit that, migrate parent
   tables first, or temporarily drop FKs and re-add them afterwards.
 
+## Troubleshooting — SQL Server connection
+
+### `Failed to connect to QYLA:1433 - Could not connect (sequence)`
+
+This is a pre-login handshake failure: SQL Server never completed login.
+It is **not** a wrong-password error — the server is not answering on
+that host:port at all, or it closes the connection during TLS setup.
+Click **Diagnose (DNS + port)** in Step 1 first — it tells you whether
+DNS, TCP, or login/TLS failed, without trying to log in.
+
+Most common causes, in order, for a local server:
+
+1. **TCP/IP is disabled.** SQL Server Express / named instances ship with
+   TCP/IP off. Open **SQL Server Configuration Manager → SQL Server
+   Network Configuration → Protocols for MSSQLSERVER** (or for your
+   instance) → **TCP/IP → Enabled**. Then **IP Addresses → IPAll → TCP
+   Port = 1433**, and **restart the SQL Server service**.
+2. **It is a named instance on a dynamic port, not 1433.** If your server
+   is `QYLA\SQLEXPRESS`, put `SQLEXPRESS` in the **Instance** field and
+   leave Port at 1433 — the app then asks the SQL Server Browser (UDP
+   1434) for the real port. Make sure the **SQL Server Browser** service
+   is running. Or find the real port in Configuration Manager and use
+   that port with no instance name.
+3. **The service is stopped, or the firewall blocks 1433.** In PowerShell:
+   ```powershell
+   Test-NetConnection QYLA -Port 1433
+   sqlcmd -S QYLA,1433 -U sa -Q "SELECT @@VERSION"
+   Get-Service MSSQLSERVER, SQLBrowser
+   ```
+   `TcpTestSucceeded: False` means nothing is listening — go back to (1).
+   Allow port 1433 through Windows Firewall (inbound TCP).
+4. **Wrong host name.** `QYLA` is the PC name. If the app runs on that
+   same PC, use `localhost` or `127.0.0.1` instead. If the app runs in
+   Docker / WSL, `QYLA` will not resolve — use the PC's LAN IP address
+   or `host.docker.internal`.
+5. **TLS.** The test first tries encryption on, then automatically retries
+   with encryption off. If the retry also fails, it is not a TLS problem.
+   You can also uncheck **Use encryption (TLS)** in Step 1 for a local
+   server.
+
+### Other errors
+
+- `Login failed` — the server answered, so the network is fine. Check
+  the username/password, that SQL Server authentication (mixed mode) is
+  enabled, and that the login can access the database.
+- `ENOTFOUND / getaddrinfo` — the host name does not resolve from where
+  the app runs; see (4) above.
+
 ## API routes
 
 | Route | Purpose |
 |---|---|
 | `POST /api/source/test` | Test the SQL Server connection. |
+| `POST /api/source/diagnose` | DNS + TCP check for the SQL Server host/port, no login. |
 | `POST /api/source/schema` | Introspect tables, columns, PKs, FKs, indexes, views, row counts. |
 | `POST /api/target/test` | Test the NHost Postgres connection (+ PostGIS check). |
 | `POST /api/migrate` | Run the migration; streams progress as SSE (`text/event-stream`). |

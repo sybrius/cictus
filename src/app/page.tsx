@@ -15,12 +15,14 @@ interface ValidationRow { table: string; source: number; target: number; match: 
 export default function Home() {
   const [step, setStep] = useState(0);
   const [source, setSource] = useState<SourceFormValues>({
-    host: 'localhost', port: 1433, user: 'sa', password: '', database: '', trustCert: true, instance: '',
+    host: 'localhost', port: 1433, user: 'sa', password: '', database: '', trustCert: true, encrypt: true, instance: '',
   });
   const [target, setTarget] = useState<TargetFormValues>({ connectionString: '' });
   const [sourceOk, setSourceOk] = useState(false);
   const [targetOk, setTargetOk] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnoseResult, setDiagnoseResult] = useState<string | null>(null);
   const [sourceResult, setSourceResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [targetResult, setTargetResult] = useState<{ ok: boolean; message: string } | null>(null);
 
@@ -60,10 +62,24 @@ export default function Home() {
     try {
       const r = await fetch('/api/source/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(v) });
       const j = await r.json();
-      if (j.ok) { setSourceOk(true); setSourceResult({ ok: true, message: `Connected — ${j.version ?? ''} (${j.database ?? ''})` }); }
+      if (j.ok) { setSourceOk(true); setSourceResult({ ok: true, message: `Connected — ${j.version ?? ''} (${j.database ?? ''})${j.encryption ? ` · encryption ${j.encryption}` : ''}` }); }
       else { setSourceOk(false); setSourceResult({ ok: false, message: `Failed: ${j.error ?? 'unknown error'}` }); }
     } catch (e) { setSourceResult({ ok: false, message: `Failed: ${e instanceof Error ? e.message : String(e)}` }); }
     finally { setTesting(false); }
+  }
+
+  async function diagnoseSource(v: SourceFormValues) {
+    setSource(v); setDiagnosing(true); setDiagnoseResult(null);
+    try {
+      const r = await fetch('/api/source/diagnose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(v) });
+      const j = await r.json();
+      setDiagnoseResult(
+        `DNS: ${j.dns?.ok ? `OK (${j.dns.address})` : `FAILED — ${j.dns?.error ?? ''}`}\n` +
+        `TCP ${v.host}:${v.instance ? '1434 (SQL Browser)' : v.port}: ${j.tcp?.ok ? 'OK — port is open' : `FAILED — ${j.tcp?.error ?? ''}`}\n` +
+        `${j.hint ?? ''}`,
+      );
+    } catch (e) { setDiagnoseResult(`Diagnose failed: ${e instanceof Error ? e.message : String(e)}`); }
+    finally { setDiagnosing(false); }
   }
 
   async function testTarget(v: TargetFormValues) {
@@ -174,7 +190,7 @@ export default function Home() {
       <section className="mt-6 rounded-lg border bg-white p-5 shadow-sm">
         {step === 0 && (
           <><h2 className="mb-3 text-lg font-semibold">1 · Connect SQL Server (source)</h2>
-          <SourceConnectionForm initial={source} onTest={testSource} testing={testing} testResult={sourceResult} /></>
+          <SourceConnectionForm initial={source} onTest={testSource} onDiagnose={diagnoseSource} testing={testing} diagnosing={diagnosing} testResult={sourceResult} diagnoseResult={diagnoseResult} /></>
         )}
         {step === 1 && (
           <><h2 className="mb-3 text-lg font-semibold">2 · Connect NHost Postgres (target)</h2>

@@ -9,6 +9,7 @@ export interface SourceFormValues {
   password: string;
   database: string;
   trustCert: boolean;
+  encrypt: boolean;
   instance: string;
 }
 
@@ -19,13 +20,19 @@ export interface TargetFormValues {
 export function SourceConnectionForm({
   initial,
   onTest,
+  onDiagnose,
   testing,
+  diagnosing,
   testResult,
+  diagnoseResult,
 }: {
   initial: SourceFormValues;
   onTest: (v: SourceFormValues) => void;
+  onDiagnose: (v: SourceFormValues) => void;
   testing: boolean;
+  diagnosing: boolean;
   testResult: { ok: boolean; message: string } | null;
+  diagnoseResult: string | null;
 }) {
   const [v, setV] = useState(initial);
   const set = (k: keyof SourceFormValues) => (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -45,13 +52,24 @@ export function SourceConnectionForm({
       <label className="flex items-center gap-2 text-sm text-slate-700">
         <input type="checkbox" checked={v.trustCert} onChange={set('trustCert')} /> Trust server certificate (self-signed)
       </label>
-      <button type="submit" disabled={testing} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
-        {testing ? 'Testing…' : 'Test connection'}
-      </button>
+      <label className="flex items-center gap-2 text-sm text-slate-700">
+        <input type="checkbox" checked={v.encrypt} onChange={set('encrypt')} /> Use encryption (TLS) — turn off for a local SQL Server if the test fails with “Could not connect (sequence)”
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button type="submit" disabled={testing} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+          {testing ? 'Testing…' : 'Test connection'}
+        </button>
+        <button type="button" disabled={diagnosing || testing} onClick={() => onDiagnose(v)} className="rounded border px-4 py-2 text-sm disabled:opacity-50">
+          {diagnosing ? 'Diagnosing…' : 'Diagnose (DNS + port)'}
+        </button>
+      </div>
+      {diagnoseResult && (
+        <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 whitespace-pre-wrap">{diagnoseResult}</p>
+      )}
       {testResult && (
         <p className={`text-sm ${testResult.ok ? 'text-green-700' : 'text-red-700'}`}>{testResult.message}</p>
       )}
-      <p className="text-xs text-slate-500">Credentials are sent to the server only for this request and are never stored.</p>
+      <p className="text-xs text-slate-500">Credentials are sent to the server only for this request and are never stored. If the host is a PC name like QYLA and the app runs on that same PC, try “localhost” instead — and for a named instance (QYLA\SQLEXPRESS) put SQLEXPRESS in Instance and leave Port at 1433.</p>
     </form>
   );
 }
