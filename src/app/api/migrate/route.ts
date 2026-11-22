@@ -66,27 +66,54 @@ export async function POST(req: Request) {
         // Previously all tables ran in a single transaction, so one
         // untranslatable DEFAULT (e.g. SYSUTCDATETIME()) rolled back
         // every table and aborted the whole migration.
+        const createdTables = new Set<string>();
+        const failedTables = new Set<string>();
         for (let i = 0; i < stmts.tables.length; i++) {
           const tableName = `${tables[i].schema}.${tables[i].name}`;
           try {
             await executeDdlInTransaction(pool, [stmts.tables[i]], (s) => log(`DDL: ${s.split('\n')[0]}`));
+            createdTables.add(tableName);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
+            failedTables.add(tableName);
             errors.push(`${tableName}: ${msg}`);
             send({ type: 'error', table: tableName, message: msg });
             log(`Table failed, continuing with the next table: ${tableName} — ${msg}`);
           }
         }
-        log('Tables created.');
-        if (stmts.fks.length) {
-          log(`Adding ${stmts.fks.length} foreign key(s)…`);
-          // FKs after data load would be faster for huge tables, but
-          // applying them now validates referential integrity early.
-          await executeDdlInTransaction(pool, stmts.fks);
-        }
+        log(`Tables created: ${createdTables.size} succeeded, ${failedTables.size} failed.`);
+        // Indexes BEFORE foreign keys: a FK may reference a column that
+        // is unique only via a UNIQUE index, and Postgres requires that
+        // index to exist before the FK is created. Each statement runs
+        // on its own so one bad FK/index no longer aborts the migration
+        // (previously the whole FK batch ran in one transaction and a
+        // single failure — "no unique constraint matching given keys
+        // for referenced table CallLog" — ended the run with 0 rows).
         if (stmts.indexes.length) {
           log(`Creating ${stmts.indexes.length} index(es)…`);
-          await executeDdlInTransaction(pool, stmts.indexes);
+          for (const ix of stmts.indexes) {
+            try {
+              await executeDdlInTransaction(pool, [ix]);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              errors.push(`index: ${msg}`);
+              send({ type: 'error', table: '', message: `Index failed: ${msg}` });
+              log(`Index failed, continuing: ${ix.split('\n')[0]} — ${msg}`);
+            }
+          }
+        }
+        if (stmts.fks.length) {
+          log(`Adding ${stmts.fks.length} foreign key(s)…`);
+          for (const fk of stmts.fks) {
+            try {
+              await executeDdlInTransaction(pool, [fk]);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              errors.push(`foreign key: ${msg}`);
+              send({ type: 'error', table: '', message: `Foreign key failed: ${msg}` });
+              log(`Foreign key failed, continuing: ${fk.split('ADD CONSTRAINT')[1]?.trim().split(' ')[0] ?? ''} — ${msg}`);
+            }
+          }
         }
 
         // ── Phase 2: data ──────────────────────────────────────────
@@ -94,6 +121,12 @@ export async function POST(req: Request) {
         if (includeData) {
           send({ type: 'phase', phase: 'data' });
           for (const table of tables) {
+            // Skip tables whose CREATE TABLE failed — there is no
+            // target table to insert into.
+            if (failedTables.has(`${table.schema}.${table.name}`)) {
+              log(`Skipping data copy for failed table ${table.schema}.${table.name}.`);
+              continue;
+            }
             try {
               const pgTypes: Record<string, string> = {};
               for (const c of table.columns) {
@@ -107,7 +140,7 @@ export async function POST(req: Request) {
               send({ type: 'error', table: `${table.schema}.${table.name}`, message: msg });
             }
           }
-          await fixIdentitySequences(pool, tables, (e) => send(e));
+          await fixIdentitySequences(pool, tables.filter((t) => createdTables.has(`${t.schema}.${t.name}`)), (e) => send(e));
         }
 
         // ── Phase 3: views ─────────────────────────────────────────
@@ -127,6 +160,7 @@ export async function POST(req: Request) {
         // ── Phase 4: validation ────────────────────────────────────
         send({ type: 'phase', phase: 'validate' });
         for (const table of tables) {
+          if (failedTables.has(`${table.schema}.${table.name}`)) continue;
           try {
             const targetCount = await targetRowCount(
               pool,
@@ -147,7 +181,7 @@ export async function POST(req: Request) {
 
         send({
           type: 'done',
-          summary: { tables: tables.length, rowsCopied, views: stmts.views.length, errors },
+          summary: { tables: createdTables.size, rowsCopied, views: stmts.views.length, errors },
         });
       } catch (err) {
         send({
