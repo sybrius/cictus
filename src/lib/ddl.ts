@@ -35,10 +35,28 @@ export function convertDefault(sqlServerDefault: string | null): string | null {
   // Strip the outer parens SQL Server stores, e.g. ((0)) -> 0
   while (d.startsWith('(') && d.endsWith(')')) d = d.slice(1, -1).trim();
   const upper = d.toUpperCase();
-  if (upper === 'GETDATE()' || upper === 'SYSDATETIME()') return 'now()';
-  if (upper === 'NEWID()') return 'gen_random_uuid()';
+  // All SQL Server "current date/time" functions -> Postgres now().
+  // SYSUTCDATETIME() was missing here (it was only handled in views),
+  // so a column DEFAULT (SYSUTCDATETIME()) was emitted verbatim and
+  // Postgres failed the whole CREATE TABLE with
+  // "function sysutcdatetime() does not exist".
+  if (
+    upper === 'GETDATE()' ||
+    upper === 'SYSDATETIME()' ||
+    upper === 'SYSUTCDATETIME()' ||
+    upper === 'GETUTCDATE()' ||
+    upper === 'SYSDATETIMEOFFSET()' ||
+    upper === 'CURRENT_TIMESTAMP'
+  ) {
+    return 'now()';
+  }
+  if (upper === 'NEWID()' || upper === 'NEWSEQUENTIALID()') return 'gen_random_uuid()';
   if (/^N'/.test(d)) return `'${d.slice(2)}`; // N'...' -> '...'
   if (upper === 'NULL') return null;
+  // An unknown function call (e.g. USER_NAME(), HOST_NAME()) would fail
+  // in Postgres the same way SYSUTCDATETIME() did. Drop the default
+  // rather than aborting the whole migration on it.
+  if (/^[A-Z_][A-Z0-9_]*\s*\(.*\)$/i.test(d)) return null;
   return d; // literals (0, 1, 'x') pass through unchanged
 }
 
@@ -139,9 +157,12 @@ export function convertViewSql(definition: string): { sql: string; notes: string
 
   // 5. Date / null functions
   sql = sql.replace(/\bGETDATE\s*\(\s*\)/gi, 'now()');
+  sql = sql.replace(/\bSYSUTCDATETIME\s*\(\s*\)/gi, 'now()');
   sql = sql.replace(/\bSYSDATETIME\s*\(\s*\)/gi, 'now()');
+  sql = sql.replace(/\bSYSDATETIMEOFFSET\s*\(\s*\)/gi, 'now()');
   sql = sql.replace(/\bGETUTCDATE\s*\(\s*\)/gi, "now() AT TIME ZONE 'UTC'");
-  sql = sql.replace(/\bISNULL\s*\(/gi, 'COALESCE(');
+  sql = sql.replace(/\bNEWID\s*\(\s*\)/gi, 'gen_random_uuid()');
+  sql = sql.replace(/\bNEWSEQUENTIALID\s*\(\s*\)/gi, 'gen_random_uuid()');
   sql = sql.replace(/\bLEN\s*\(/gi, 'LENGTH(');
   sql = sql.replace(/\bCHARINDEX\s*\(/gi, 'STRPOS(');
 

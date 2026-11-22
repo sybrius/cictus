@@ -62,7 +62,21 @@ export async function POST(req: Request) {
           );
         }
         log(`Creating ${stmts.tables.length} table(s)…`);
-        await executeDdlInTransaction(pool, stmts.tables, (s) => log(`DDL: ${s.split('\n')[0]}`));
+        // Create tables one at a time, each in its own transaction.
+        // Previously all tables ran in a single transaction, so one
+        // untranslatable DEFAULT (e.g. SYSUTCDATETIME()) rolled back
+        // every table and aborted the whole migration.
+        for (let i = 0; i < stmts.tables.length; i++) {
+          const tableName = `${tables[i].schema}.${tables[i].name}`;
+          try {
+            await executeDdlInTransaction(pool, [stmts.tables[i]], (s) => log(`DDL: ${s.split('\n')[0]}`));
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            errors.push(`${tableName}: ${msg}`);
+            send({ type: 'error', table: tableName, message: msg });
+            log(`Table failed, continuing with the next table: ${tableName} — ${msg}`);
+          }
+        }
         log('Tables created.');
         if (stmts.fks.length) {
           log(`Adding ${stmts.fks.length} foreign key(s)…`);
