@@ -285,7 +285,7 @@ const INDEX_SQL = `
 SELECT
   s.name AS [schema], t.name AS [table], i.name AS indexName,
   i.is_unique AS isUnique, i.is_primary_key AS isPrimaryKey,
-  c.name AS [column], ic.key_ordinal AS ord
+  c.name AS [column], ic.key_ordinal AS [ord]
 FROM sys.indexes i
 JOIN sys.tables t ON t.object_id = i.object_id
 JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -304,7 +304,7 @@ ORDER BY s.name, v.name;
 `;
 
 const ROWCOUNT_SQL = `
-SELECT s.name AS [schema], t.name AS [table], p.rows AS rowCount
+SELECT s.name AS [schema], t.name AS [table], p.[rows] AS [rowCount]
 FROM sys.tables t
 JOIN sys.schemas s ON s.schema_id = t.schema_id
 JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0, 1)
