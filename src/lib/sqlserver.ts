@@ -32,6 +32,11 @@ export interface ColumnInfo {
   isIdentity: boolean;
   defaultValue: string | null;
   collation: string | null;
+  /** Source-specific extra type text. MySQL sets this to COLUMN_TYPE
+   *  (e.g. `tinyint(1)`, `int unsigned`, `enum('a','b')`) — what
+   *  DATA_TYPE drops and the MySQL type mapper needs. SQL Server
+   *  leaves it undefined. */
+  sourceExtra?: string | null;
 }
 
 export interface ForeignKeyInfo {
