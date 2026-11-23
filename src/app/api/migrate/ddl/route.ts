@@ -2,9 +2,11 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { SqlServerConfigSchema, introspectSchema } from '@/lib/sqlserver';
 import { generateMigrationScript } from '@/lib/ddl';
+import { resolveSource } from '@/lib/resolve-connector';
 
 const BodySchema = z.object({
-  source: SqlServerConfigSchema,
+  source: SqlServerConfigSchema.optional(),
+  sourceConnectorId: z.string().optional(),
   tables: z.array(z.string()).min(1, 'Select at least one table'),
   views: z.array(z.string()).default([]),
   overrides: z.record(z.string()).default({}),
@@ -25,7 +27,18 @@ export async function POST(req: Request) {
     );
   }
   try {
-    const full = await introspectSchema(parsed.data.source);
+    const { config } = resolveSource({
+      sourceConnectorId: parsed.data.sourceConnectorId,
+      source: parsed.data.source,
+    });
+    const sourceParsed = SqlServerConfigSchema.safeParse(config);
+    if (!sourceParsed.success) {
+      return NextResponse.json(
+        { ok: false, error: sourceParsed.error.issues.map((i) => i.message).join('; ') },
+        { status: 400 },
+      );
+    }
+    const full = await introspectSchema(sourceParsed.data);
     const tables = full.tables.filter((t) => parsed.data.tables.includes(`${t.schema}.${t.name}`));
     const views = full.views.filter((v) => parsed.data.views.includes(`${v.schema}.${v.name}`));
     const { script, viewNotes } = generateMigrationScript(tables, views, parsed.data.overrides);

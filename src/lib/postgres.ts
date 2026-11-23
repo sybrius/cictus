@@ -77,7 +77,7 @@ export async function targetRowCount(
   schema: string,
   table: string,
 ): Promise<number> {
-  if (!/^[A-Za-z0-9_]+$/.test(schema) || !/^[A-Za-z0-9_ ]+$/.test(table)) {
+  if (!/^[A-Za-z0-9_]+$/.test(schema) || !/^[A-Za-z0-9_ \-]+$/.test(table)) {
     throw new Error(`Unsafe table name: ${schema}.${table}`);
   }
   const r = await pool.query<{ n: string }>(`SELECT count(*) AS n FROM "${schema}"."${table}"`);

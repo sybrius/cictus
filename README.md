@@ -1,19 +1,57 @@
-# SQL Server → NHost Migrator
+# SQL Server → Postgres Migrator (Cictus)
 
-A Next.js (App Router, TypeScript, Tailwind) web app that migrates SQL Server
-tables, schema, data and views to **NHost Postgres / Hasura** through a
-6-step wizard:
+A Next.js (App Router, TypeScript, Tailwind) enterprise-style web app that
+migrates SQL Server tables, schema, data and views to **NHost, Supabase, or
+any PostgreSQL** database — all three are plain Postgres under the hood, so
+the same engine drives them all.
 
-1. **Connect SQL Server** — host/port/user/password/database, connection test.
-2. **Connect NHost** — Postgres connection string, connection test (incl. PostGIS check).
-3. **Discover & Select** — introspects `INFORMATION_SCHEMA` + `sys.views` /
-   `sys.sql_modules`; pick tables and views, with row counts and no-PK flags.
-4. **Type Mapping** — editable SQL Server → Postgres type map with warnings
-   for lossy conversions.
-5. **Migrate** — schema (tables → FKs → indexes) → data in 1,000-row batches
-   → views → live log + progress, streamed over SSE.
-6. **Validate & Report** — source vs target row counts, error list, and a
-   downloadable `.sql` script of the generated DDL.
+The app has four areas (sidebar navigation):
+
+- **Dashboard** (`/`) — totals across all recorded runs (runs, rows, tables,
+  success rate), recent migrations, and connector status.
+- **New migration** (`/migrate`) — the 6-step wizard:
+  1. **Connect SQL Server** — pick a saved source connector or connect manually.
+  2. **Connect target** — pick a saved NHost / Supabase / PostgreSQL connector
+     or paste a connection string manually.
+  3. **Discover & Select** — introspects `INFORMATION_SCHEMA` + `sys.views` /
+     `sys.sql_modules`; pick tables and views, with row counts and no-PK flags.
+  4. **Type Mapping** — editable SQL Server → Postgres type map with warnings
+     for lossy conversions.
+  5. **Migrate** — schema (tables → indexes) → data in 1,000-row batches →
+     foreign keys → views → live log + progress, streamed over SSE.
+  6. **Validate & Report** — source vs target row counts, error list, and a
+     downloadable `.sql` script of the generated DDL.
+- **Connectors** (`/connectors`) — save named, reusable connections: SQL Server
+  sources, and NHost / Supabase / PostgreSQL targets. A connector's password
+  is stored only on this machine (`data/connectors.json`, git-ignored) and is
+  never sent back to the browser — the wizard sends only the connector id and
+  the server resolves the credentials.
+- **History** (`/history`) — every migration run, with per-table validation and
+  errors, read from the local DuckDB store.
+
+## Targets: NHost vs Supabase vs plain Postgres
+
+| Target | Connection | After migration |
+|---|---|---|
+| NHost | Dashboard → Database → Connection string (enable public access first): `postgres://postgres:…@<subdomain>.db.<region>.nhost.run:5432/postgres` | Track tables in Hasura (Dashboard → Hasura → Data) |
+| Supabase | Project Settings → Database → Connection string, direct (port 5432): `db.<project-ref>.supabase.co`, user `postgres`, database `postgres` | Tables appear in the Table Editor; check RLS policies before exposing via the API |
+| PostgreSQL | Any Postgres host/port/database/user/password | Nothing extra |
+
+Use the direct 5432 connection (not the 6543 pooler) for DDL and bulk loads.
+
+## Local DuckDB history
+
+Every migration run is recorded in `data/migrations.duckdb` (tables
+`migrations`, `migration_tables`, `migration_errors`) — no server, no
+credentials, just results. Query it directly, e.g. with the DuckDB CLI:
+
+```sql
+SELECT started_at, source_name, target_name, target_type, rows_copied, errors_count
+FROM migrations ORDER BY started_at DESC;
+```
+
+The `data/` directory is git-ignored: the DuckDB file and
+`data/connectors.json` live only on the machine that runs the app.
 
 ## Setup
 

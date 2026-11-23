@@ -1,17 +1,26 @@
 import { z } from 'zod';
+import crypto from 'crypto';
 import { SqlServerConfigSchema, introspectSchema } from '@/lib/sqlserver';
 import { TargetConfigSchema, createTargetPool, executeDdlInTransaction, targetRowCount } from '@/lib/postgres';
 import { schemaStatements } from '@/lib/ddl';
 import { copyTableData, fixIdentitySequences, type ProgressEvent } from '@/lib/migrate-data';
+import { recordRunStart, recordRunFinish } from '@/lib/history-db';
+import { resolveSource, resolveTarget } from '@/lib/resolve-connector';
 
 const BodySchema = z.object({
-  source: SqlServerConfigSchema,
-  target: TargetConfigSchema,
+  source: SqlServerConfigSchema.optional(),
+  sourceConnectorId: z.string().optional(),
+  target: TargetConfigSchema.optional(),
+  targetConnectorId: z.string().optional(),
   tables: z.array(z.string()).min(1, 'Select at least one table'),
   views: z.array(z.string()).default([]),
   overrides: z.record(z.string()).default({}),
   includeData: z.boolean().default(true),
   dropExisting: z.boolean().default(false),
+  // Display names for the local DuckDB history record (not credentials).
+  sourceName: z.string().optional(),
+  targetName: z.string().optional(),
+  targetType: z.string().optional(),
 });
 
 type OutEvent =
@@ -23,8 +32,9 @@ type OutEvent =
 
 /**
  * POST → Server-Sent Events stream (text/event-stream).
- * Phases: schema (tables → FKs → indexes) → data (batched copy) →
- * views → validate (row counts source vs target).
+ * Phases: schema (tables → indexes) → data (batched copy) →
+ * foreign keys (after data, so orphans / copy order cannot lose
+ * rows) → views → validate (row counts source vs target).
  * The client reads the stream with fetch + ReadableStream and renders
  * live progress; the response only ends when migration is complete.
  */
@@ -37,7 +47,33 @@ export async function POST(req: Request) {
       { status: 400, headers: { 'Content-Type': 'application/json' } },
     );
   }
-  const { source, target, overrides, includeData, dropExisting } = parsed.data;
+  const { overrides, includeData, dropExisting } = parsed.data;
+  // Resolve saved connectors server-side (passwords never leave the
+  // server) or fall back to the form values the wizard sent.
+  let resolvedSource: z.infer<typeof SqlServerConfigSchema>;
+  let resolvedTarget: z.infer<typeof TargetConfigSchema>;
+  let connectorTargetType: string | null = null;
+  try {
+    const s = resolveSource({ sourceConnectorId: parsed.data.sourceConnectorId, source: parsed.data.source });
+    const t = resolveTarget({ targetConnectorId: parsed.data.targetConnectorId, target: parsed.data.target });
+    const sParsed = SqlServerConfigSchema.safeParse(s.config);
+    const tParsed = TargetConfigSchema.safeParse({ connectionString: t.connectionString });
+    if (!sParsed.success) throw new Error(sParsed.error.issues.map((i) => i.message).join('; '));
+    if (!tParsed.success) throw new Error(tParsed.error.issues.map((i) => i.message).join('; '));
+    resolvedSource = sParsed.data;
+    resolvedTarget = tParsed.data;
+    connectorTargetType = t.connectorType;
+    if (s.connectorName && !parsed.data.sourceName) parsed.data.sourceName = s.connectorName;
+    if (t.connectorName && !parsed.data.targetName) parsed.data.targetName = t.connectorName;
+    if (connectorTargetType && !parsed.data.targetType) parsed.data.targetType = connectorTargetType;
+  } catch (e) {
+    return new Response(
+      JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+  const source = resolvedSource;
+  const target = resolvedTarget;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -46,11 +82,39 @@ export async function POST(req: Request) {
       const log = (message: string) => send({ type: 'log', message });
       const errors: string[] = [];
       const pool = createTargetPool(target);
+      // Local DuckDB history: one run record per migration, so the
+      // Dashboard / History pages can show it later. A history
+      // failure must never break the migration itself.
+      const runId = crypto.randomUUID();
+      const sourceName = parsed.data.sourceName || `${source.host}/${source.database}`;
+      const targetName = parsed.data.targetName || 'Postgres target';
+      const targetType = parsed.data.targetType || 'postgres';
+      const validationRows: { table: string; source: number; target: number; match: boolean }[] = [];
+      let viewsCreated = 0;
+      let runRecorded = false;
+      const finishHistory = async (status: 'completed' | 'failed', tablesSucceeded: number, rowsCopied: number) => {
+        if (!runRecorded) return;
+        try {
+          await recordRunFinish({
+            id: runId, status, tablesSucceeded, rowsCopied, viewsCreated,
+            errorsCount: errors.length,
+            tables: validationRows.map((v) => ({
+              runId, tableName: v.table, sourceRows: v.source, targetRows: v.target, matched: v.match,
+              status: v.match ? 'ok' : 'mismatch',
+            })),
+            errors: errors.map((m) => ({ scope: m.split(':')[0] || 'migration', message: m })),
+          });
+        } catch { /* history is best-effort */ }
+      };
       try {
         const full = await introspectSchema(source);
         const tables = full.tables.filter((t) => parsed.data.tables.includes(`${t.schema}.${t.name}`));
         const views = full.views.filter((v) => parsed.data.views.includes(`${v.schema}.${v.name}`));
         const stmts = schemaStatements(tables, views, overrides);
+        try {
+          await recordRunStart({ id: runId, sourceName, targetName, targetType, tablesTotal: tables.length, viewsTotal: views.length });
+          runRecorded = true;
+        } catch { /* history is best-effort */ }
 
         // ── Phase 1: schema ────────────────────────────────────────
         send({ type: 'phase', phase: 'schema' });
@@ -102,19 +166,16 @@ export async function POST(req: Request) {
             }
           }
         }
-        if (stmts.fks.length) {
-          log(`Adding ${stmts.fks.length} foreign key(s)…`);
-          for (const fk of stmts.fks) {
-            try {
-              await executeDdlInTransaction(pool, [fk]);
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              errors.push(`foreign key: ${msg}`);
-              send({ type: 'error', table: '', message: `Foreign key failed: ${msg}` });
-              log(`Foreign key failed, continuing: ${fk.split('ADD CONSTRAINT')[1]?.trim().split(' ')[0] ?? ''} — ${msg}`);
-            }
-          }
-        }
+        // Foreign keys are NOT created here any more. They are created
+        // AFTER the data copy (see below): with FKs in place first,
+        // rows that reference a parent copied later in alphabetical
+        // order (UserRoles before Users) or orphaned rows in SQL
+        // Server (CommunityMethod1/2/3.WorkerId → CommunityWorkers,
+        // which has 0 rows) failed the whole batch copy and those rows
+        // were lost. Deferring FKs lets all data land; an FK that
+        // still cannot be created afterwards is reported by name and
+        // the data stays in place.
+        void stmts.fks;
 
         // ── Phase 2: data ──────────────────────────────────────────
         let rowsCopied = 0;
@@ -143,17 +204,57 @@ export async function POST(req: Request) {
           await fixIdentitySequences(pool, tables.filter((t) => createdTables.has(`${t.schema}.${t.name}`)), (e) => send(e));
         }
 
+        // ── Phase 2b: foreign keys (after data) ────────────────────
+        // See the note in the schema phase: FKs are added only now
+        // that all rows are in place, so copy order and orphaned rows
+        // in the source cannot lose data. A FK that still fails
+        // (e.g. orphaned WorkerId values with no parent row in
+        // CommunityWorkers) is reported by constraint name; the data
+        // stays, and the FK can be added after cleaning the orphans,
+        // or dropped from the target.
+        if (stmts.fks.length) {
+          log(`Adding ${stmts.fks.length} foreign key(s)…`);
+          for (const fk of stmts.fks) {
+            try {
+              await executeDdlInTransaction(pool, [fk]);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              const name = fk.split('ADD CONSTRAINT')[1]?.trim().split(' ')[0] ?? '';
+              errors.push(`foreign key ${name}: ${msg}`);
+              send({ type: 'error', table: '', message: `Foreign key failed: ${msg}` });
+              log(`Foreign key failed, continuing: ${name} — ${msg} — data is already copied; check for orphaned rows in the source for this constraint, then re-add it or drop it.`);
+            }
+          }
+        }
+
         // ── Phase 3: views ─────────────────────────────────────────
         send({ type: 'phase', phase: 'views' });
+        // Make sure each view's schema exists (e.g. dbhkuser) before
+        // creating views in it; tables live in public, views may not.
+        {
+          const viewSchemas = [...new Set(views.map((v) => (v.schema === 'dbo' ? 'public' : v.schema.toLowerCase())))];
+          for (const s of viewSchemas) {
+            try {
+              await pool.query(`CREATE SCHEMA IF NOT EXISTS "${s}"`);
+            } catch (err) {
+              log(`Could not create schema "${s}": ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        }
         for (const v of stmts.views) {
           try {
             await pool.query(v.sql);
+            viewsCreated++;
             send({ type: 'view-done', view: v.name, notes: v.notes });
             log(`View created: ${v.name}${v.notes.length ? ` (${v.notes.length} note(s) — review)` : ''}`);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             errors.push(`view ${v.name}: ${msg}`);
             send({ type: 'error', table: v.name, message: msg });
+            // Log the converted SQL so the next run shows exactly what
+            // Postgres choked on — a bare "syntax error at or near CL"
+            // cannot be diagnosed without it.
+            log(`View failed: ${v.name} — ${msg} — converted SQL: ${v.sql.slice(0, 600)}`);
           }
         }
 
@@ -167,13 +268,14 @@ export async function POST(req: Request) {
               table.schema === 'dbo' ? 'public' : table.schema,
               table.name,
             );
-            send({
-              type: 'validation',
+            const row = {
               table: `${table.schema}.${table.name}`,
               source: table.rowCount,
               target: targetCount,
               match: targetCount === table.rowCount,
-            });
+            };
+            validationRows.push(row);
+            send({ type: 'validation', ...row });
           } catch (err) {
             errors.push(`validate ${table.schema}.${table.name}: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -183,6 +285,7 @@ export async function POST(req: Request) {
           type: 'done',
           summary: { tables: createdTables.size, rowsCopied, views: stmts.views.length, errors },
         });
+        await finishHistory(errors.length ? 'failed' : 'completed', createdTables.size, rowsCopied);
       } catch (err) {
         send({
           type: 'error',
@@ -193,6 +296,8 @@ export async function POST(req: Request) {
           type: 'done',
           summary: { tables: 0, rowsCopied: 0, views: 0, errors: [err instanceof Error ? err.message : String(err)] },
         });
+        errors.push(err instanceof Error ? err.message : String(err));
+        await finishHistory('failed', 0, 0);
       } finally {
         await pool.end().catch(() => undefined);
         controller.close();

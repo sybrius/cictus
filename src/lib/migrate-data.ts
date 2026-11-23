@@ -97,10 +97,29 @@ export async function fixIdentitySequences(
     for (const col of table.columns.filter((c) => c.isIdentity)) {
       const schema = pgSchema(table.schema);
       try {
-        await target.query(
-          `SELECT setval(pg_get_serial_sequence($1, $2), COALESCE((SELECT MAX(${pgIdent(col.name)}) FROM ${pgIdent(schema)}.${pgIdent(table.name)}), 1))`,
-          [`${schema}.${table.name}`, col.name],
-        );
+      // pg_get_serial_sequence takes the table as a regclass string.
+      // It must be double-quoted: passing public.CallLog unquoted folds
+      // to public.calllog, and Postgres then reports relation
+      // "public.calllog" does not exist — the table is actually
+      // "CallLog" (mixed case, quoted at creation). Same for hyphenated
+      // names like "CallLog-BKP". Skip silently when there is no
+      // sequence (pg_get_serial_sequence returns NULL).
+      const seq = await target.query<{ seq: string | null }>(
+        'SELECT pg_get_serial_sequence($1, $2) AS seq',
+        [`"${schema}"."${table.name}"`, col.name],
+      );
+      const seqName = seq.rows[0]?.seq;
+      if (!seqName) {
+        onEvent({
+          type: 'log',
+          message: `No sequence for ${table.schema}.${table.name}.${col.name} — skipping.`,
+        });
+        continue;
+      }
+      await target.query(
+        `SELECT setval($1::regclass, COALESCE((SELECT MAX(${pgIdent(col.name)}) FROM ${pgIdent(schema)}.${pgIdent(table.name)}), 1))`,
+        [seqName],
+      );
         onEvent({
           type: 'log',
           message: `Sequence fixed for ${table.schema}.${table.name}.${col.name}`,

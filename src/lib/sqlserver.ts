@@ -414,7 +414,7 @@ export async function streamTableRows(
 ): Promise<number> {
   // Bracket-quoted identifiers only; schema/table come from the
   // introspected list, never raw user input, and are validated here.
-  if (!/^[A-Za-z0-9_]+$/.test(schema) || !/^[A-Za-z0-9_ ]+$/.test(table)) {
+  if (!/^[A-Za-z0-9_]+$/.test(schema) || !/^[A-Za-z0-9_ \-]+$/.test(table)) {
     throw new Error(`Unsafe table name: ${schema}.${table}`);
   }
   let total = 0;

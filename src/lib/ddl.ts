@@ -137,6 +137,65 @@ export function generateIndexes(table: TableInfo): string[] {
 
 // ── T-SQL -> Postgres view conversion ──────────────────────────────────
 
+/** Rewrite CONVERT(type, expr [, style]) as CAST(expr AS type).
+ *  Parses balanced parentheses and splits on top-level commas, so
+ *  CONVERT(varchar(10), x, 101) and CONVERT(datetime, GETDATE()) work.
+ *  A style argument (the 3rd) is dropped — Postgres has no equivalent;
+ *  date formatting must be done with TO_CHAR instead. */
+function convertConvertCalls(sql: string, notes: string[]): string {
+  const mapType = (t: string): string => {
+    const tt = t.trim().toLowerCase();
+    if (tt.startsWith('nvarchar') || tt.startsWith('nchar')) return tt.replace(/^n(var)?char/, 'varchar');
+    if (tt === 'datetime' || tt === 'datetime2' || tt === 'smalldatetime') return 'timestamptz';
+    if (tt === 'bit') return 'boolean';
+    if (tt === 'int') return 'integer';
+    if (tt === 'uniqueidentifier') return 'uuid';
+    if (tt === 'float') return 'double precision';
+    return tt;
+  };
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    const m = /\bCONVERT\s*\(/i.exec(sql.slice(i));
+    if (!m) { out += sql.slice(i); break; }
+    const start = i + m.index;
+    out += sql.slice(i, start);
+    // Find the matching close paren, tracking nesting and quotes.
+    let depth = 0, j = start + m[0].length - 1, inStr = false;
+    for (; j < sql.length; j++) {
+      const c = sql[j];
+      if (c === "'") inStr = !inStr;
+      if (inStr) continue;
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) break; }
+    }
+    if (j >= sql.length) { out += sql.slice(start); break; }
+    const inner = sql.slice(start + m[0].length, j);
+    // Split inner on top-level commas.
+    const parts: string[] = [];
+    let cur = '', d = 0, s = false;
+    for (const c of inner) {
+      if (c === "'") s = !s;
+      if (!s) {
+        if (c === '(') d++;
+        else if (c === ')') d--;
+        else if (c === ',' && d === 0) { parts.push(cur); cur = ''; continue; }
+      }
+      cur += c;
+    }
+    parts.push(cur);
+    if (parts.length >= 2) {
+      if (parts.length > 2) notes.push('CONVERT with a style argument was rewritten as CAST — date formatting may differ; use TO_CHAR if the output format matters.');
+      out += `CAST(${parts[1].trim()} AS ${mapType(parts[0])})`;
+    } else {
+      out += sql.slice(start, j + 1);
+      notes.push('Unparseable CONVERT call left unchanged; review manually.');
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
 /** Convert a T-SQL view body to Postgres SQL. Best-effort, rule-based:
  *  covers the common constructs; anything exotic is flagged for review
  *  and the original is kept in a comment. */
@@ -148,13 +207,25 @@ export function convertViewSql(definition: string): { sql: string; notes: string
   //    Postgres schema name. Keep everything from the first SELECT.
   const selectIdx = sql.search(/\bSELECT\b/i);
   if (selectIdx > 0) sql = sql.slice(selectIdx);
-  else notes.push('Could not find SELECT in view definition; review manually.');
+  else if (selectIdx === -1) notes.push('Could not find SELECT in view definition; review manually.');
 
   // 2. Square brackets -> double quotes: [dbo].[Orders] -> "dbo"."Orders"
   sql = sql.replace(/\[([^\]]+)\]/g, '"$1"');
 
-  // 3. dbo. prefix -> public. (other schemas are lower-cased as-is)
+  // 2b. Table hints: WITH (NOLOCK) / WITH (READPAST) / WITH (INDEX(...))
+  // Postgres has no table hints — `FROM dbo.CallLog CL WITH (NOLOCK)`
+  // fails with "syntax error at or near CL" / "WITH". Strip them.
+  // (A leading WITH … AS ( … ) CTE is not a hint and is left alone:
+  // hints only appear after a table name / alias.)
+  sql = sql.replace(/\s+WITH\s*\(\s*(?:NOLOCK|READPAST|ROWLOCK|UPDLOCK|HOLDLOCK|TABLOCK|INDEX\s*\([^)]*\))[^)]*\)/gi, '');
+
+  // 3. dbo. prefix -> public. Handle both quoted "dbo". and unquoted
+  // dbo. — the unquoted form was missed before, so views failed with
+  // relation "dbo.communitymethod2" does not exist. Same for dbhkuser.
   sql = sql.replace(/"dbo"\./gi, '"public".');
+  sql = sql.replace(/\bdbo\./gi, '"public".');
+  sql = sql.replace(/"dbhkuser"\./gi, '"public".');
+  sql = sql.replace(/\bdbhkuser\./gi, '"public".');
 
   // 4. TOP n -> LIMIT n (only the common `SELECT TOP n ...` form, and
   //    `SELECT DISTINCT TOP n`). TOP with PERCENT / WITH TIES is flagged.
@@ -178,6 +249,20 @@ export function convertViewSql(definition: string): { sql: string; notes: string
   sql = sql.replace(/\bGETUTCDATE\s*\(\s*\)/gi, "now() AT TIME ZONE 'UTC'");
   sql = sql.replace(/\bNEWID\s*\(\s*\)/gi, 'gen_random_uuid()');
   sql = sql.replace(/\bNEWSEQUENTIALID\s*\(\s*\)/gi, 'gen_random_uuid()');
+
+  // 5b. CONVERT(type, expr [, style]) -> CAST(expr AS type).
+  // Balanced-paren parsing: CONVERT(varchar(10), x, 101) has commas
+  // inside the type and a style argument, so a plain regex cannot do it.
+  sql = convertConvertCalls(sql, notes);
+  // varchar(max) / nvarchar(max) -> text (Postgres has no (max)).
+  sql = sql.replace(/\b(varchar|nvarchar)\s*\(\s*max\s*\)/gi, 'text');
+  // DATEADD(unit, n, date) -> date + INTERVAL 'n unit' for the common units.
+  sql = sql.replace(/\bDATEADD\s*\(\s*(day|dd|d|month|mm|m|year|yy|yyyy|hour|hh|minute|mi|n|second|ss|s)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\)/gi,
+    (_m, unit: string, n: string, d: string) => {
+      const u = { day: 'day', dd: 'day', d: 'day', month: 'month', mm: 'month', m: 'month', year: 'year', yy: 'year', yyyy: 'year', hour: 'hour', hh: 'hour', minute: 'minute', mi: 'minute', n: 'minute', second: 'second', ss: 'second', s: 'second' }[unit.toLowerCase()] ?? 'day';
+      return `(${d.trim()} + INTERVAL '${n.trim()} ${u}')`;
+    });
+  sql = sql.replace(/\bISNULL\s*\(/gi, 'COALESCE(');
   sql = sql.replace(/\bLEN\s*\(/gi, 'LENGTH(');
   sql = sql.replace(/\bCHARINDEX\s*\(/gi, 'STRPOS(');
 
