@@ -76,7 +76,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="mt-1 text-sm text-slate-600">
-            Migrate SQL Server to NHost, Supabase or any PostgreSQL — every run is recorded locally in DuckDB.
+            Migrate SQL Server or MySQL to NHost, Supabase or any PostgreSQL — every run is recorded locally in DuckDB.
           </p>
         </div>
         <Link href="/migrate" className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white">
@@ -130,7 +130,7 @@ export default function Dashboard() {
           </div>
           {connectors.length === 0 ? (
             <p className="mt-3 text-sm text-slate-600">
-              No connectors saved yet. Add a SQL Server source and an NHost, Supabase or PostgreSQL target, then pick them in the wizard instead of re-typing credentials.
+              No connectors saved yet. Add a SQL Server or MySQL source and an NHost, Supabase or PostgreSQL target, then pick them in the wizard instead of re-typing credentials.
             </p>
           ) : (
             <ul className="mt-3 space-y-2 text-sm">
