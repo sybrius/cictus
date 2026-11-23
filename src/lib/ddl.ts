@@ -196,28 +196,74 @@ function convertConvertCalls(sql: string, notes: string[]): string {
   return out;
 }
 
+/** Strip T-SQL table hints (`WITH (NOLOCK)`, `WITH (NOLOCK, INDEX(…))`,
+ *  …) with balanced-paren scanning, so nested parens inside the hint
+ *  do not leave a stray `)` behind. A leading CTE `WITH x AS (` is
+ *  not a hint (it is followed by an identifier and AS, not `(`) and
+ *  is left alone. */
+function stripTableHints(sql: string): string {
+  const HINT = /^(?:NOLOCK|READUNCOMMITTED|READPAST|REPEATABLEREAD|SERIALIZABLE|ROWLOCK|UPDLOCK|HOLDLOCK|TABLOCK|INDEX\b)/i;
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    const m = /\bWITH\s*\(/i.exec(sql.slice(i));
+    if (!m) { out += sql.slice(i); break; }
+    const start = i + m.index;
+    const innerStart = start + m[0].length;
+    const inner = sql.slice(innerStart, innerStart + 40);
+    if (!HINT.test(inner.trim())) { out += sql.slice(i, innerStart); i = innerStart; continue; }
+    // Find the matching close paren, tracking nesting and quotes.
+    let depth = 1, j = innerStart, inStr = false;
+    for (; j < sql.length; j++) {
+      const c = sql[j];
+      if (c === "'") inStr = !inStr;
+      if (inStr) continue;
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) break; }
+    }
+    if (j >= sql.length) { out += sql.slice(i); break; }
+    out += sql.slice(i, start);
+    i = j + 1;
+  }
+  return out;
+}
+
 /** Convert a T-SQL view body to Postgres SQL. Best-effort, rule-based:
  *  covers the common constructs; anything exotic is flagged for review
- *  and the original is kept in a comment. */
-export function convertViewSql(definition: string): { sql: string; notes: string[] } {
+ *  and the original is kept in a comment.
+ *  `knownNames` are the exact (mixed-case) table and view names in the
+ *  migration — Postgres folds unquoted identifiers to lowercase, but
+ *  the tables were created quoted ("CommunityMethod2"), so a view
+ *  reference must be quoted with its exact case or it fails with
+ *  relation "public.communitymethod2" does not exist. */
+export function convertViewSql(definition: string, knownNames: string[] = []): { sql: string; notes: string[] } {
   const notes: string[] = [];
   let sql = definition;
+  const known = new Map(knownNames.map((n) => [n.toLowerCase(), n]));
 
   // 1. Drop the CREATE VIEW header — the caller re-adds it with the
-  //    Postgres schema name. Keep everything from the first SELECT.
+  //    Postgres schema name. Keep everything from the first SELECT,
+  //    or from a leading WITH … AS ( … ) CTE if one comes first:
+  //    slicing from SELECT on a CTE view dropped the `WITH x AS (`
+  //    header and left a stray `)` behind ("syntax error at or near )").
+  const cteIdx = sql.search(/\bWITH\s+[A-Za-z_][A-Za-z0-9_$#]*\s+AS\s*\(/i);
   const selectIdx = sql.search(/\bSELECT\b/i);
-  if (selectIdx > 0) sql = sql.slice(selectIdx);
+  if (cteIdx >= 0 && (selectIdx === -1 || cteIdx < selectIdx)) sql = sql.slice(cteIdx);
+  else if (selectIdx > 0) sql = sql.slice(selectIdx);
   else if (selectIdx === -1) notes.push('Could not find SELECT in view definition; review manually.');
 
   // 2. Square brackets -> double quotes: [dbo].[Orders] -> "dbo"."Orders"
   sql = sql.replace(/\[([^\]]+)\]/g, '"$1"');
 
-  // 2b. Table hints: WITH (NOLOCK) / WITH (READPAST) / WITH (INDEX(...))
+  // 2b. Table hints: WITH (NOLOCK) / WITH (READUNCOMMITTED) / WITH (INDEX(...))
   // Postgres has no table hints — `FROM dbo.CallLog CL WITH (NOLOCK)`
-  // fails with "syntax error at or near CL" / "WITH". Strip them.
+  // fails with "syntax error at or near CL" / "WITH". Strip them,
+  // including the bare `(NOLOCK)` form (no WITH keyword) and hints
+  // with nested parens such as WITH (NOLOCK, INDEX(IX_Foo)).
   // (A leading WITH … AS ( … ) CTE is not a hint and is left alone:
   // hints only appear after a table name / alias.)
-  sql = sql.replace(/\s+WITH\s*\(\s*(?:NOLOCK|READPAST|ROWLOCK|UPDLOCK|HOLDLOCK|TABLOCK|INDEX\s*\([^)]*\))[^)]*\)/gi, '');
+  sql = stripTableHints(sql);
+  sql = sql.replace(/\s*\(\s*(?:NOLOCK|READUNCOMMITTED|READPAST)\s*\)/gi, '');
 
   // 3. dbo. prefix -> public. Handle both quoted "dbo". and unquoted
   // dbo. — the unquoted form was missed before, so views failed with
@@ -226,6 +272,27 @@ export function convertViewSql(definition: string): { sql: string; notes: string
   sql = sql.replace(/\bdbo\./gi, '"public".');
   sql = sql.replace(/"dbhkuser"\./gi, '"public".');
   sql = sql.replace(/\bdbhkuser\./gi, '"public".');
+
+  // 3b. Quote the table name after a schema prefix, with its exact
+  // case from the known tables/views when available. Without this,
+  // `"public".CommunityMethod2` folds to `public.communitymethod2`,
+  // which does not exist — the table is "CommunityMethod2".
+  // Bare FROM/JOIN references to a known table are qualified the same
+  // way, unless the name is a CTE defined in this view.
+  if (known.size > 0) {
+    sql = sql.replace(/"public"\.("?)([A-Za-z_][A-Za-z0-9_$#]*)("?)/g, (_m, _q1, name: string) => {
+      const exact = known.get(name.toLowerCase());
+      return `"public"."${exact ?? name}"`;
+    });
+    const cteNames = new Set<string>();
+    for (const m of sql.matchAll(/\bWITH\s+([A-Za-z_][A-Za-z0-9_$#]*)\s+AS\s*\(/gi)) cteNames.add(m[1].toLowerCase());
+    for (const m of sql.matchAll(/,\s*([A-Za-z_][A-Za-z0-9_$#]*)\s+AS\s*\(/g)) cteNames.add(m[1].toLowerCase());
+    sql = sql.replace(/\b(FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_$#]*)/gi, (m, kw: string, name: string) => {
+      if (cteNames.has(name.toLowerCase())) return m;
+      const exact = known.get(name.toLowerCase());
+      return exact ? `${kw} "public"."${exact}"` : m;
+    });
+  }
 
   // 4. TOP n -> LIMIT n (only the common `SELECT TOP n ...` form, and
   //    `SELECT DISTINCT TOP n`). TOP with PERCENT / WITH TIES is flagged.
@@ -286,8 +353,9 @@ export function convertViewSql(definition: string): { sql: string; notes: string
 
 export function generateCreateView(
   view: ViewInfo,
+  knownNames: string[] = [],
 ): { sql: string; notes: string[] } {
-  const { sql, notes } = convertViewSql(view.definition);
+  const { sql, notes } = convertViewSql(view.definition, knownNames);
   const header = `CREATE OR REPLACE VIEW ${pgIdent(pgSchema(view.schema))}.${pgIdent(view.name)} AS`;
   return { sql: `${header}\n${sql};`, notes };
 }
@@ -311,6 +379,7 @@ export function generateMigrationScript(
     '',
   ];
   const viewNotes: Record<string, string[]> = {};
+  const knownNames = [...tables.map((t) => t.name), ...views.map((v) => v.name)];
 
   for (const t of tables) parts.push(generateCreateTable(t, overrides), '');
   for (const t of tables) {
@@ -323,7 +392,7 @@ export function generateMigrationScript(
   if (tables.some((t) => t.foreignKeys.length)) parts.push('');
 
   for (const v of views) {
-    const { sql, notes } = generateCreateView(v);
+    const { sql, notes } = generateCreateView(v, knownNames);
     if (notes.length) viewNotes[`${v.schema}.${v.name}`] = notes;
     parts.push(`-- View: ${v.schema}.${v.name}`);
     for (const n of notes) parts.push(`--   NOTE: ${n}`);
@@ -345,7 +414,7 @@ export function schemaStatements(
     fks: tables.flatMap((t) => generateForeignKeys(t)),
     indexes: tables.flatMap((t) => generateIndexes(t)),
     views: views.map((v) => {
-      const { sql, notes } = generateCreateView(v);
+      const { sql, notes } = generateCreateView(v, [...tables.map((t) => t.name), ...views.map((x) => x.name)]);
       return { name: `${v.schema}.${v.name}`, sql, notes };
     }),
   };

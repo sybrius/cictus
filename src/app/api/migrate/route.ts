@@ -310,7 +310,7 @@ export async function POST(req: Request) {
             // Log the converted SQL so the next run shows exactly what
             // Postgres choked on — a bare "syntax error at or near CL"
             // cannot be diagnosed without it.
-            log(`View failed: ${v.name} — ${msg} — converted SQL: ${v.sql.slice(0, 600)}`);
+            log(`View failed: ${v.name} — ${msg} — converted SQL: ${v.sql.slice(0, 2000)}`);
           }
         }
 
