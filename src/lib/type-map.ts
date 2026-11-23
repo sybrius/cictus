@@ -3,6 +3,9 @@
  *
  * Every mapping is explicit so the wizard can show it, let the user edit
  * it, and warn about lossy conversions before anything is created.
+ *
+ * MySQL mappings live in mapMysqlType below and share the MappedType
+ * shape; mapSourceType dispatches on the migration source.
  */
 
 export interface MappedType {
@@ -155,3 +158,168 @@ export const KNOWN_SQLSERVER_TYPES = [
   'uniqueidentifier', 'xml', 'sql_variant', 'hierarchyid', 'geography',
   'geometry', 'timestamp',
 ] as const;
+
+// ── MySQL -> Postgres ────────────────────────────────────────────────
+
+export interface MysqlColumnType {
+  dataType: string; // e.g. tinyint, varchar, datetime
+  /** COLUMN_TYPE, e.g. `tinyint(1)`, `int unsigned`, `enum('a','b')`. */
+  columnType?: string | null;
+  maxLength: number | null; // CHARACTER_MAXIMUM_LENGTH
+  numericPrecision: number | null;
+  numericScale: number | null;
+  datetimePrecision: number | null;
+}
+
+/** MySQL -> Postgres. `columnType` matters: `tinyint(1)` is MySQL's
+ *  boolean, and `int unsigned` exceeds Postgres `integer`. */
+export function mapMysqlType(col: MysqlColumnType): MappedType {
+  const t = col.dataType.toLowerCase();
+  const ct = (col.columnType ?? '').toLowerCase();
+  const len = col.maxLength;
+  const p = col.numericPrecision;
+  const s = col.numericScale;
+  const unsigned = /\bunsigned\b/.test(ct);
+
+  switch (t) {
+    // ── Integers ────────────────────────────────────────────────────
+    case 'tinyint':
+      // tinyint(1) is how MySQL/ORMs store booleans.
+      if (/^tinyint\(1\)/.test(ct)) return { pgType: 'boolean' };
+      return { pgType: unsigned ? 'smallint' : 'smallint' };
+    case 'smallint':
+      return { pgType: unsigned ? 'integer' : 'smallint' };
+    case 'mediumint':
+      return { pgType: 'integer' };
+    case 'int':
+    case 'integer':
+      // int unsigned goes to 4,294,967,295 — past integer's max.
+      return { pgType: unsigned ? 'bigint' : 'integer' };
+    case 'bigint':
+      return unsigned
+        ? {
+            pgType: 'numeric(20)',
+            warning: 'bigint unsigned exceeds Postgres bigint (max 9.2e18); mapped to numeric(20) so no values are lost.',
+          }
+        : { pgType: 'bigint' };
+
+    // ── Exact / approximate numerics ────────────────────────────────
+    case 'bit': {
+      const m = ct.match(/^bit\((\d+)\)/);
+      const bits = m ? Number(m[1]) : 1;
+      return bits === 1
+        ? { pgType: 'boolean' }
+        : { pgType: `bit(${bits})`, warning: `bit(${bits}) maps to Postgres bit(${bits}); bit-string operations differ from MySQL.` };
+    }
+    case 'decimal':
+    case 'numeric':
+      return { pgType: `numeric(${p ?? 10},${s ?? 0})` };
+    case 'float': return { pgType: 'real' };
+    case 'double':
+    case 'double precision': return { pgType: 'double precision' };
+
+    // ── Date / time ─────────────────────────────────────────────────
+    case 'date': return { pgType: 'date' };
+    case 'time': return { pgType: `time(${col.datetimePrecision ?? 0})` };
+    // DATETIME carries no timezone in MySQL; TIMESTAMP does (it is
+    // stored in UTC and converted to the session zone).
+    case 'datetime': return { pgType: 'timestamp' };
+    case 'timestamp': return { pgType: 'timestamptz' };
+    case 'year': return { pgType: 'smallint' };
+
+    // ── Character strings ───────────────────────────────────────────
+    case 'char':
+      return { pgType: `char(${len ?? 1})` };
+    case 'varchar':
+      return { pgType: `varchar(${len})` };
+    case 'tinytext':
+    case 'text':
+    case 'mediumtext':
+    case 'longtext':
+      return { pgType: 'text' };
+    case 'enum':
+      return {
+        pgType: 'text',
+        warning: `${ct || 'enum'} has no Postgres equivalent; mapped to text. The allowed values are not enforced — add a CHECK constraint if you need them enforced.`,
+      };
+    case 'set':
+      return {
+        pgType: 'text',
+        warning: 'set has no Postgres equivalent; mapped to text holding the comma-separated values.',
+      };
+
+    // ── Binary ──────────────────────────────────────────────────────
+    case 'binary':
+    case 'varbinary':
+    case 'tinyblob':
+    case 'blob':
+    case 'mediumblob':
+    case 'longblob':
+      return { pgType: 'bytea' };
+
+    // ── Other ───────────────────────────────────────────────────────
+    case 'json':
+      return { pgType: 'jsonb', warning: 'MySQL JSON maps to jsonb; key order is not preserved and duplicate keys are dropped.' };
+    case 'geometry':
+    case 'point':
+    case 'linestring':
+    case 'polygon':
+    case 'multipoint':
+    case 'multilinestring':
+    case 'multipolygon':
+    case 'geometrycollection':
+      return {
+        pgType: 'geometry',
+        needsReview: true,
+        warning: 'Requires the PostGIS extension (CREATE EXTENSION postgis) on the target. Spatial methods differ; verify queries after migration. NHost Postgres does not enable PostGIS by default — enable it in the NHost dashboard first.',
+      };
+
+    default:
+      return {
+        pgType: 'text',
+        needsReview: true,
+        warning: `Unknown MySQL type "${col.dataType}" — defaulted to text. Review before migrating.`,
+      };
+  }
+}
+
+/** All known MySQL types, for the editable mapping dropdown. */
+export const KNOWN_MYSQL_TYPES = [
+  'tinyint', 'smallint', 'mediumint', 'int', 'bigint', 'bit', 'decimal',
+  'numeric', 'float', 'double', 'date', 'time', 'datetime', 'timestamp',
+  'year', 'char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext',
+  'enum', 'set', 'binary', 'varbinary', 'tinyblob', 'blob', 'mediumblob',
+  'longblob', 'json', 'geometry', 'point', 'linestring', 'polygon',
+] as const;
+
+/** Dispatch on the migration source. `col` is the shared ColumnInfo
+ *  shape (dataType / lengths / sourceExtra = MySQL COLUMN_TYPE). */
+export function mapSourceType(
+  source: 'sqlserver' | 'mysql',
+  col: {
+    dataType: string;
+    sourceExtra?: string | null;
+    maxLength: number | null;
+    numericPrecision: number | null;
+    numericScale: number | null;
+    datetimePrecision: number | null;
+  },
+): MappedType {
+  if (source === 'mysql') {
+    return mapMysqlType({
+      dataType: col.dataType,
+      columnType: col.sourceExtra,
+      maxLength: col.maxLength,
+      numericPrecision: col.numericPrecision,
+      numericScale: col.numericScale,
+      datetimePrecision: col.datetimePrecision,
+    });
+  }
+  return mapSqlServerType({
+    dataType: col.dataType,
+    maxLength: col.maxLength,
+    numericPrecision: col.numericPrecision,
+    numericScale: col.numericScale,
+    datetimePrecision: col.datetimePrecision,
+  });
+}
