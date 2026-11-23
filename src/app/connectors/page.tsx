@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver';
+type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql';
 
 interface Connector {
   id: string; name: string; type: ConnectorType; kind: string;
@@ -17,12 +17,13 @@ const TYPE_META: Record<ConnectorType, { label: string; hint: string }> = {
   supabase: { label: 'Supabase (Postgres)', hint: 'Enter the project ref (from the Supabase dashboard URL / Project Settings) and the postgres password. Host defaults to db.<project-ref>.supabase.co:5432. Or paste the direct connection string instead (use the direct 5432 string, not the 6543 pooler, for DDL).' },
   postgres: { label: 'PostgreSQL (generic)', hint: 'Any Postgres server: host, port (5432), database, user and password — or paste a full connection string.' },
   sqlserver: { label: 'SQL Server', hint: 'Source database: host, port (1433), database, user and password. Named instance goes in Instance; leave Port at 1433 for a named instance.' },
+  mysql: { label: 'MySQL', hint: 'Source database: host, port (3306), database, user and password. Enable SSL only if the server requires it (most local / Docker setups do not).' },
 };
 
 const EMPTY: Record<string, string | number | boolean> = {
   name: '', type: 'nhost', projectRef: '', region: 'eu-central-1', host: '', port: 5432,
   database: 'postgres', user: 'postgres', password: '', connectionString: '',
-  instance: '', encrypt: true, trustCert: true,
+  instance: '', encrypt: true, trustCert: true, ssl: false,
 };
 
 export default function ConnectorsPage() {
@@ -48,7 +49,7 @@ export default function ConnectorsPage() {
     setForm((f) => ({ ...f, [k]: e.target.type === 'checkbox' ? (e.target as HTMLInputElement).checked : e.target.type === 'number' ? Number(e.target.value) : e.target.value }));
 
   function startAdd(type: ConnectorType) {
-    setForm({ ...EMPTY, type, port: type === 'sqlserver' ? 1433 : 5432, database: type === 'sqlserver' ? '' : 'postgres', user: type === 'sqlserver' ? 'sa' : 'postgres' });
+    setForm({ ...EMPTY, type, port: type === 'sqlserver' ? 1433 : type === 'mysql' ? 3306 : 5432, database: type === 'sqlserver' || type === 'mysql' ? '' : 'postgres', user: type === 'sqlserver' ? 'sa' : type === 'mysql' ? 'root' : 'postgres' });
     setEditingId(null);
     setShowForm(true);
     setMessage(null); setError(null);
@@ -58,7 +59,7 @@ export default function ConnectorsPage() {
     setForm({
       name: c.name, type: c.type, projectRef: c.projectRef, region: c.region || 'eu-central-1',
       host: c.host, port: c.port, database: c.database, user: c.user, password: '',
-      connectionString: c.connectionString, instance: c.instance, encrypt: c.encrypt, trustCert: c.trustCert,
+      connectionString: c.connectionString, instance: c.instance, encrypt: c.encrypt, trustCert: c.trustCert, ssl: (c as { ssl?: boolean }).ssl ?? false,
     });
     setEditingId(c.id);
     setShowForm(true);
@@ -102,7 +103,7 @@ export default function ConnectorsPage() {
         <div>
           <h1 className="text-2xl font-bold">Connectors</h1>
           <p className="mt-1 text-sm text-slate-600">
-            Named, reusable connections. Add a SQL Server source once, and NHost, Supabase or PostgreSQL targets — then pick them in the migration wizard instead of re-typing credentials.
+            Named, reusable connections. Add a SQL Server or MySQL source once, and NHost, Supabase or PostgreSQL targets — then pick them in the migration wizard instead of re-typing credentials.
           </p>
         </div>
         <div className="flex gap-2">
@@ -122,7 +123,7 @@ export default function ConnectorsPage() {
           <div className="mt-4 grid grid-cols-2 gap-3">
             <div><label className={label}>Name</label><input className={input} value={String(form.name)} onChange={set('name')} placeholder="e.g. NHost production" required /></div>
             <div><label className={label}>Type</label>
-              <select className={input} value={type} onChange={(e) => { const t = e.target.value as ConnectorType; setForm((f) => ({ ...f, type: t, port: t === 'sqlserver' ? 1433 : 5432 })); }}>
+              <select className={input} value={type} onChange={(e) => { const t = e.target.value as ConnectorType; setForm((f) => ({ ...f, type: t, port: t === 'sqlserver' ? 1433 : t === 'mysql' ? 3306 : 5432 })); }}>
                 {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => <option key={t} value={t}>{TYPE_META[t].label}</option>)}
               </select>
             </div>
@@ -132,18 +133,23 @@ export default function ConnectorsPage() {
                 {type === 'nhost' && <div><label className={label}>Region</label><input className={input} value={String(form.region)} onChange={set('region')} placeholder="eu-central-1" /></div>}
               </>
             )}
-            <div><label className={label}>Host {type !== 'sqlserver' && '(optional if project ref / connection string is given)'}</label><input className={input} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'QYLA' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} /></div>
+            <div><label className={label}>Host {(type === 'sqlserver' || type === 'mysql') ? '' : '(optional if project ref / connection string is given)'}</label><input className={input} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'QYLA' : type === 'mysql' ? 'localhost' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} /></div>
             <div><label className={label}>Port</label><input className={input} type="number" value={Number(form.port)} onChange={set('port')} /></div>
             <div><label className={label}>Database</label><input className={input} value={String(form.database)} onChange={set('database')} /></div>
             <div><label className={label}>User</label><input className={input} value={String(form.user)} onChange={set('user')} /></div>
             <div><label className={label}>Password {editingId ? '(leave blank to keep the saved one)' : ''}</label><input className={input} type="password" value={String(form.password)} onChange={set('password')} autoComplete="new-password" /></div>
             {type === 'sqlserver' && <div><label className={label}>Instance (optional)</label><input className={input} value={String(form.instance)} onChange={set('instance')} placeholder="SQLEXPRESS" /></div>}
-            {type !== 'sqlserver' && <div className="col-span-2"><label className={label}>Connection string (optional — overrides host/port/user above)</label><input className={input} type="password" value={String(form.connectionString)} onChange={set('connectionString')} placeholder="postgres://postgres:…@host:5432/postgres" autoComplete="new-password" /></div>}
+            {type !== 'sqlserver' && type !== 'mysql' && <div className="col-span-2"><label className={label}>Connection string (optional — overrides host/port/user above)</label><input className={input} type="password" value={String(form.connectionString)} onChange={set('connectionString')} placeholder="postgres://postgres:…@host:5432/postgres" autoComplete="new-password" /></div>}
           </div>
           {type === 'sqlserver' && (
             <div className="mt-3 flex gap-4 text-sm">
               <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.encrypt)} onChange={set('encrypt')} /> Encryption (TLS)</label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.trustCert)} onChange={set('trustCert')} /> Trust server certificate</label>
+            </div>
+          )}
+          {type === 'mysql' && (
+            <div className="mt-3 flex gap-4 text-sm">
+              <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.ssl)} onChange={set('ssl')} /> Use SSL/TLS</label>
             </div>
           )}
           <div className="mt-4 flex gap-2">
