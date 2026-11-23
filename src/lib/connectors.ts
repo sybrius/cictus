@@ -23,7 +23,7 @@ import crypto from 'crypto';
  * form `postgres://postgres:<password>@<subdomain>.db.<region>.nhost.run:5432/postgres`.
  */
 
-export type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver';
+export type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql';
 export type ConnectorKind = 'source' | 'target';
 
 export interface Connector {
@@ -75,6 +75,11 @@ export const CONNECTOR_TYPES: Record<ConnectorType, { label: string; kind: Conne
     label: 'SQL Server',
     kind: 'source',
     hint: 'Source database. Host, port (1433), database, user and password. Named instance goes in Instance; leave Port at 1433 for a named instance.',
+  },
+  mysql: {
+    label: 'MySQL',
+    kind: 'source',
+    hint: 'Source database. Host, port (3306), database, user and password. Enable SSL only if the server requires it.',
   },
 };
 
@@ -157,8 +162,24 @@ export function targetConnectionString(c: Connector): string {
   return `postgres://${encodeURIComponent(c.user)}:${pw}@${c.host}:${c.port || 5432}/${c.database || 'postgres'}`;
 }
 
-/** Source (SQL Server) config for a connector, in the wizard's form shape. */
+/** Source config for a connector, in the wizard's form shape.
+ *  MySQL connectors return ssl + sourceType 'mysql'; SQL Server ones
+ *  return the TLS / instance fields with sourceType 'sqlserver'. */
 export function sourceFormValues(c: Connector) {
+  if (c.type === 'mysql') {
+    return {
+      host: c.host,
+      port: c.port || 3306,
+      user: c.user,
+      password: c.password,
+      database: c.database,
+      trustCert: false,
+      encrypt: false,
+      instance: '',
+      ssl: c.ssl,
+      sourceType: 'mysql' as const,
+    };
+  }
   return {
     host: c.host,
     port: c.port || 1433,
@@ -168,5 +189,7 @@ export function sourceFormValues(c: Connector) {
     trustCert: c.trustCert,
     encrypt: c.encrypt,
     instance: c.instance,
+    ssl: false,
+    sourceType: 'sqlserver' as const,
   };
 }
