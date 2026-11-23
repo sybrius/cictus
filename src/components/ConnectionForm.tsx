@@ -1,7 +1,8 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { Database, FileUp, HardDrive, Loader2, Server, Stethoscope } from 'lucide-react';
+import { FileUp, Loader2, Stethoscope } from 'lucide-react';
+import { BrandIcon } from '@/components/BrandIcons';
 import { Field, Toggle, inputCls } from '@/components/ui';
 import type { SourceKind } from '@/lib/type-map';
 
@@ -31,11 +32,11 @@ export interface TargetFormValues {
 }
 
 const SOURCE_TYPES: { kind: SourceKind; icon: React.ReactNode; title: string; sub: string; port: number }[] = [
-  { kind: 'sqlserver', icon: <HardDrive className="h-5 w-5" />, title: 'SQL Server', sub: 'T-SQL · port 1433', port: 1433 },
-  { kind: 'mysql', icon: <Database className="h-5 w-5" />, title: 'MySQL', sub: 'MySQL 5.7 / 8 · port 3306', port: 3306 },
-  { kind: 'postgres', icon: <Server className="h-5 w-5" />, title: 'PostgreSQL', sub: 'Same engine, other database', port: 5432 },
-  { kind: 'oracle', icon: <Database className="h-5 w-5" />, title: 'Oracle', sub: 'Oracle 12c+ · port 1521', port: 1521 },
-  { kind: 'sqlite', icon: <FileUp className="h-5 w-5" />, title: 'SQLite', sub: 'Local .sqlite / .db file', port: 0 },
+  { kind: 'sqlserver', icon: <BrandIcon type="sqlserver" className="h-5 w-5" />, title: 'SQL Server', sub: 'T-SQL · port 1433', port: 1433 },
+  { kind: 'mysql', icon: <BrandIcon type="mysql" className="h-5 w-5" />, title: 'MySQL', sub: 'MySQL 5.7 / 8 · port 3306', port: 3306 },
+  { kind: 'postgres', icon: <BrandIcon type="postgres" className="h-5 w-5" />, title: 'PostgreSQL', sub: 'Same engine, other database', port: 5432 },
+  { kind: 'oracle', icon: <BrandIcon type="oracle" className="h-5 w-5" />, title: 'Oracle', sub: 'Oracle 12c+ · port 1521', port: 1521 },
+  { kind: 'sqlite', icon: <BrandIcon type="sqlite" className="h-5 w-5" />, title: 'SQLite', sub: 'Local .sqlite / .db file', port: 0 },
 ];
 
 function SourceTypeCard({

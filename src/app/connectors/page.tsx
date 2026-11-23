@@ -3,17 +3,14 @@
 import { useEffect, useState } from 'react';
 import {
   CheckCircle2,
-  Cloud,
   Database,
-  FileUp,
-  HardDrive,
   Pencil,
   PlugZap,
-  Plus,
   Server,
   Trash2,
   XCircle,
 } from 'lucide-react';
+import { BrandIcon } from '@/components/BrandIcons';
 import { Alert, Badge, Button, Card, CardHeader, EmptyState, Field, PageHeader, Toggle, inputCls } from '@/components/ui';
 
 type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql' | 'postgres-source' | 'oracle' | 'sqlite';
@@ -36,17 +33,6 @@ const TYPE_META: Record<ConnectorType, { label: string; hint: string; kind: 'sou
   'postgres-source': { label: 'PostgreSQL (source)', hint: 'A Postgres database as a migration source: paste its connection string (postgres://user:…@host:5432/db). Same engine, different database — or a different Postgres server entirely.', kind: 'source' },
   oracle: { label: 'Oracle', hint: 'Oracle 12c+ as a migration source (thin driver — no Oracle client needed). Host, port (1521), service name, and the schema-owner user and password. Only tables owned by that user are migrated.', kind: 'source' },
   sqlite: { label: 'SQLite (file)', hint: 'A local .sqlite / .db file: give the path on the machine the app runs on. The file is opened read-only; tables land in the target\'s public schema.', kind: 'source' },
-};
-
-const TYPE_ICON: Record<ConnectorType, typeof Database> = {
-  nhost: Cloud,
-  supabase: Server,
-  postgres: Database,
-  sqlserver: HardDrive,
-  mysql: Database,
-  'postgres-source': Server,
-  oracle: Database,
-  sqlite: FileUp,
 };
 
 const TYPE_TILE: Record<ConnectorType, string> = {
@@ -158,8 +144,8 @@ export default function ConnectorsPage() {
         actions={
           <div className="flex flex-wrap gap-2">
             {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => (
-              <Button key={t} size="sm" variant={t === 'nhost' || t === 'sqlserver' ? 'primary' : 'secondary'} onClick={() => startAdd(t)}>
-                <Plus className="h-3.5 w-3.5" />
+              <Button key={t} size="sm" variant="secondary" onClick={() => startAdd(t)}>
+                <BrandIcon type={t} className="h-4 w-4 shrink-0" />
                 {TYPE_META[t].label}
               </Button>
             ))}
@@ -299,12 +285,11 @@ export default function ConnectorsPage() {
               </div>
               <div className="grid gap-4 md:grid-cols-2">
                 {items.map((c) => {
-                  const Icon = TYPE_ICON[c.type];
                   return (
                     <Card key={c.id} hover className="p-5">
                       <div className="flex items-start gap-3.5">
                         <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${TYPE_TILE[c.type]}`}>
-                          <Icon className="h-5 w-5" />
+                          <BrandIcon type={c.type} className="h-6 w-6" />
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start justify-between gap-2">
