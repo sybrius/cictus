@@ -8,9 +8,15 @@ import { recordRunStart, recordRunFinish } from '@/lib/history-db';
 import { resolveSource, resolveTarget } from '@/lib/resolve-connector';
 
 const BodySchema = z.object({
-  source: SqlServerConfigSchema.optional(),
+  // Raw form values, accepted as-is: when a connector id is given,
+  // these are the wizard's untouched defaults (empty password /
+  // empty connection string) and the resolver below replaces them
+  // with the saved connector's credentials. Validating them here
+  // was the bug behind the 400 on /api/migrate with a connector
+  // selected — the resolved config is validated instead, below.
+  source: z.unknown().optional(),
   sourceConnectorId: z.string().optional(),
-  target: TargetConfigSchema.optional(),
+  target: z.unknown().optional(),
   targetConnectorId: z.string().optional(),
   tables: z.array(z.string()).min(1, 'Select at least one table'),
   views: z.array(z.string()).default([]),

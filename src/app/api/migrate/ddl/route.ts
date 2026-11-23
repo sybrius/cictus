@@ -5,7 +5,10 @@ import { generateMigrationScript } from '@/lib/ddl';
 import { resolveSource } from '@/lib/resolve-connector';
 
 const BodySchema = z.object({
-  source: SqlServerConfigSchema.optional(),
+  // Same as /api/migrate: raw form values accepted as-is, so a
+  // connector run (empty password / connection string in the form)
+  // is not rejected with a 400 before the resolver runs.
+  source: z.unknown().optional(),
   sourceConnectorId: z.string().optional(),
   tables: z.array(z.string()).min(1, 'Select at least one table'),
   views: z.array(z.string()).default([]),

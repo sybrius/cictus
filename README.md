@@ -139,7 +139,7 @@ own pool and closes it afterwards.
 
 ## Troubleshooting — SQL Server connection
 
-### `Failed to connect to SERVER-NAME:1433 - Could not connect (sequence)`
+### `Failed to connect to QYLA:1433 - Could not connect (sequence)`
 
 This is a pre-login handshake failure: SQL Server never completed login.
 It is **not** a wrong-password error — the server is not answering on
@@ -155,22 +155,22 @@ Most common causes, in order, for a local server:
    instance) → **TCP/IP → Enabled**. Then **IP Addresses → IPAll → TCP
    Port = 1433**, and **restart the SQL Server service**.
 2. **It is a named instance on a dynamic port, not 1433.** If your server
-   is `SERVER-NAME\SQLEXPRESS`, put `SQLEXPRESS` in the **Instance** field and
+   is `QYLA\SQLEXPRESS`, put `SQLEXPRESS` in the **Instance** field and
    leave Port at 1433 — the app then asks the SQL Server Browser (UDP
    1434) for the real port. Make sure the **SQL Server Browser** service
    is running. Or find the real port in Configuration Manager and use
    that port with no instance name.
 3. **The service is stopped, or the firewall blocks 1433.** In PowerShell:
    ```powershell
-   Test-NetConnection SERVER-NAME -Port 1433
-   sqlcmd -S SERVER-NAME,1433 -U sa -Q "SELECT @@VERSION"
+   Test-NetConnection QYLA -Port 1433
+   sqlcmd -S QYLA,1433 -U sa -Q "SELECT @@VERSION"
    Get-Service MSSQLSERVER, SQLBrowser
    ```
    `TcpTestSucceeded: False` means nothing is listening — go back to (1).
    Allow port 1433 through Windows Firewall (inbound TCP).
-4. **Wrong host name.** `SERVER-NAME` is the PC name. If the app runs on that
+4. **Wrong host name.** `QYLA` is the PC name. If the app runs on that
    same PC, use `localhost` or `127.0.0.1` instead. If the app runs in
-   Docker / WSL, `SERVER-NAME` will not resolve — use the PC's LAN IP address
+   Docker / WSL, `QYLA` will not resolve — use the PC's LAN IP address
    or `host.docker.internal`.
 5. **TLS.** The test first tries encryption on, then automatically retries
    with encryption off. If the retry also fails, it is not a TLS problem.

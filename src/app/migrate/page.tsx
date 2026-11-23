@@ -168,6 +168,10 @@ export default function MigratePage() {
           tables: [...selectedTables], views: [...selectedViews], overrides, includeData, dropExisting,
         }),
       });
+      if (!r.ok) {
+        const j = await r.json().catch(() => null);
+        throw new Error(j?.error ?? `Migration request failed (${r.status})`);
+      }
       if (!r.body) throw new Error('No response stream from server');
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
