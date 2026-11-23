@@ -1,7 +1,7 @@
 'use client';
 
 import type { DatabaseSchema } from '@/lib/sqlserver';
-import { mapSqlServerType } from '@/lib/type-map';
+import { mapSourceType } from '@/lib/type-map';
 
 const PG_TYPES = [
   'smallint', 'integer', 'bigint', 'boolean', 'numeric(18,2)', 'numeric(19,4)',
@@ -14,11 +14,13 @@ export function TypeMappingTable({
   selection,
   overrides,
   onOverride,
+  sourceType = 'sqlserver',
 }: {
   schema: DatabaseSchema;
   selection: { tables: Set<string> };
   overrides: Record<string, string>;
   onOverride: (key: string, pgType: string) => void;
+  sourceType?: 'sqlserver' | 'mysql';
 }) {
   const tables = schema.tables.filter((t) => selection.tables.has(`${t.schema}.${t.name}`));
   return (
@@ -26,7 +28,7 @@ export function TypeMappingTable({
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-slate-100 text-left">
           <tr>
-            <th className="px-3 py-2">Column</th><th className="px-3 py-2">SQL Server</th>
+            <th className="px-3 py-2">Column</th><th className="px-3 py-2">{sourceType === 'mysql' ? 'MySQL' : 'SQL Server'}</th>
             <th className="px-3 py-2">Postgres</th><th className="px-3 py-2">Warning</th>
           </tr>
         </thead>
@@ -34,8 +36,9 @@ export function TypeMappingTable({
           {tables.flatMap((t) =>
             t.columns.map((c) => {
               const key = `${c.schema}.${c.table}.${c.name}`;
-              const mapped = mapSqlServerType({
+              const mapped = mapSourceType(sourceType, {
                 dataType: c.dataType,
+                sourceExtra: c.sourceExtra,
                 maxLength: c.maxLength,
                 numericPrecision: c.numericPrecision,
                 numericScale: c.numericScale,
