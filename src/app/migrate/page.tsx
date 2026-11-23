@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import type { DatabaseSchema } from '@/lib/sqlserver';
 import { SourceConnectionForm, TargetConnectionForm, type SourceFormValues, type TargetFormValues } from '@/components/ConnectionForm';
+import type { SourceKind } from '@/lib/type-map';
 import { SchemaTree } from '@/components/SchemaTree';
 import { TypeMappingTable } from '@/components/TypeMappingTable';
 import { MigrationLog, type LogLine } from '@/components/MigrationLog';
@@ -29,7 +30,7 @@ import { Alert, Badge, Button, Card, CardHeader, PageHeader, inputCls } from '@/
 const STEPS = ['Connect source', 'Connect target', 'Discover & Select', 'Type Mapping', 'Migrate', 'Validate & Report'];
 
 interface ValidationRow { table: string; source: number; target: number; match: boolean }
-interface ConnectorSummary { id: string; name: string; type: string; kind: string; host: string; database: string; projectRef: string; region: string; lastTestOk: boolean | null }
+interface ConnectorSummary { id: string; name: string; type: string; kind: string; host: string; database: string; projectRef: string; region: string; hasuraEndpoint: string; hasHasuraSecret: boolean; lastTestOk: boolean | null }
 
 const TARGET_HINTS: Record<string, string> = {
   nhost: 'After migration, track the new tables in the Hasura console (NHost Dashboard → Hasura → Data) so they appear in your GraphQL API. Tables without a primary key cannot be tracked until one is added.',
@@ -49,7 +50,7 @@ const STEP_DESCRIPTIONS = [
 export default function MigratePage() {
   const [step, setStep] = useState(0);
   const [source, setSource] = useState<SourceFormValues>({
-    host: 'localhost', port: 1433, user: 'sa', password: '', database: '', trustCert: true, encrypt: true, instance: '', ssl: false, sourceType: 'sqlserver',
+    host: 'localhost', port: 1433, user: 'sa', password: '', database: '', trustCert: true, encrypt: true, instance: '', ssl: false, connectionString: '', service: '', filePath: '', sourceType: 'sqlserver',
   });
   const [target, setTarget] = useState<TargetFormValues>({ connectionString: '' });
   const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
@@ -71,12 +72,14 @@ export default function MigratePage() {
 
   const [includeData, setIncludeData] = useState(true);
   const [dropExisting, setDropExisting] = useState(false);
+  const [useCopy, setUseCopy] = useState(true);
+  const [trackInHasura, setTrackInHasura] = useState(false);
   const [migrating, setMigrating] = useState(false);
   const [phase, setPhase] = useState('');
   const [log, setLog] = useState<LogLine[]>([]);
   const [progress, setProgress] = useState<Record<string, { copied: number; total: number }>>({});
   const [validation, setValidation] = useState<ValidationRow[]>([]);
-  const [summary, setSummary] = useState<{ tables: number; rowsCopied: number; views: number; errors: string[] } | null>(null);
+  const [summary, setSummary] = useState<{ tables: number; rowsCopied: number; views: number; errors: string[]; hasura?: { tracked: string[]; alreadyTracked: string[]; failed: { table: string; error: string }[] } } | null>(null);
   const [script, setScript] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,13 +93,28 @@ export default function MigratePage() {
   const selectedTargetConnector = connectors.find((c) => c.id === targetConnectorId);
   /** The source dialect for this run: from the picked connector, or
    *  from the manual form's source-type selector. */
-  const effectiveSourceType: 'sqlserver' | 'mysql' = selectedSourceConnector
-    ? (selectedSourceConnector.type === 'mysql' ? 'mysql' : 'sqlserver')
+  const effectiveSourceType: SourceKind = selectedSourceConnector
+    ? (selectedSourceConnector.type === 'mysql' ? 'mysql'
+      : selectedSourceConnector.type === 'postgres-source' ? 'postgres'
+      : selectedSourceConnector.type === 'oracle' ? 'oracle'
+      : selectedSourceConnector.type === 'sqlite' ? 'sqlite'
+      : 'sqlserver')
     : source.sourceType;
-  const sourceTypeLabel = effectiveSourceType === 'mysql' ? 'MySQL' : 'SQL Server';
+  const sourceTypeLabel = { sqlserver: 'SQL Server', mysql: 'MySQL', postgres: 'PostgreSQL', oracle: 'Oracle', sqlite: 'SQLite' }[effectiveSourceType];
   const targetTypeLabel = selectedTargetConnector
     ? selectedTargetConnector.type === 'nhost' ? 'NHost' : selectedTargetConnector.type === 'supabase' ? 'Supabase' : 'PostgreSQL'
     : 'Postgres';
+  /** Hasura auto-track is available when the picked target has an
+   *  admin secret saved (NHost derives the endpoint; plain Postgres
+   *  needs a Hasura endpoint saved too). */
+  const hasuraAvailable = Boolean(
+    selectedTargetConnector?.hasHasuraSecret &&
+      (selectedTargetConnector.type === 'nhost' ||
+        (selectedTargetConnector.type === 'postgres' && selectedTargetConnector.hasuraEndpoint?.trim())),
+  );
+  useEffect(() => {
+    setTrackInHasura(hasuraAvailable);
+  }, [hasuraAvailable]);
 
   const totalRows = useMemo(
     () => (schema?.tables ?? []).filter((t) => selectedTables.has(`${t.schema}.${t.name}`)).reduce((a, t) => a + t.rowCount, 0),
@@ -130,10 +148,9 @@ export default function MigratePage() {
       const body = sourceConnectorId ? { sourceConnectorId } : v;
       const r = await fetch('/api/source/diagnose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json();
-      const host = sourceConnectorId ? (selectedSourceConnector?.host ?? '') : v.host;
       setDiagnoseResult(
         `DNS: ${j.dns?.ok ? `OK (${j.dns.address})` : `FAILED — ${j.dns?.error ?? ''}`}\n` +
-        `TCP ${host}: ${j.tcp?.ok ? 'OK — port is open' : `FAILED — ${j.tcp?.error ?? ''}`}\n` +
+        `Check: ${j.tcp?.ok ? 'OK' : `FAILED — ${j.tcp?.error ?? ''}`}\n` +
         `${j.hint ?? ''}`,
       );
     } catch (e) { setDiagnoseResult(`Diagnose failed: ${e instanceof Error ? e.message : String(e)}`); }
@@ -194,10 +211,10 @@ export default function MigratePage() {
           source, target,
           sourceConnectorId: sourceConnectorId || undefined,
           targetConnectorId: targetConnectorId || undefined,
-          sourceName: selectedSourceConnector?.name ?? `${source.host}/${source.database}`,
+          sourceName: selectedSourceConnector?.name ?? undefined,
           targetName: selectedTargetConnector?.name ?? 'Postgres target',
           targetType: selectedTargetConnector?.type ?? 'postgres',
-          tables: [...selectedTables], views: [...selectedViews], overrides, includeData, dropExisting,
+          tables: [...selectedTables], views: [...selectedViews], overrides, includeData, dropExisting, useCopy, trackInHasura,
         }),
       });
       if (!r.ok) {
@@ -405,7 +422,7 @@ export default function MigratePage() {
             {step === 4 && (
               <div>
                 <p className="mb-4 text-sm leading-relaxed text-slate-600">
-                  Order: create tables → indexes → copy data in 1,000-row batches → add foreign keys → create views → validate row counts.
+                  Order: create tables → indexes → copy data (fast COPY bulk load for tables with 5,000+ rows, batched INSERT otherwise) → add foreign keys → create views → validate row counts.
                   The run is recorded in the local DuckDB history.
                 </p>
                 <div className="mb-5 flex flex-wrap items-center gap-x-6 gap-y-3 text-sm">
@@ -414,9 +431,19 @@ export default function MigratePage() {
                     Copy data
                   </label>
                   <label className="flex cursor-pointer items-center gap-2 font-medium text-slate-700">
+                    <input type="checkbox" checked={useCopy} onChange={(e) => setUseCopy(e.target.checked)} className="h-4 w-4 accent-brand-600" />
+                    Fast COPY bulk load for large tables
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2 font-medium text-slate-700">
                     <input type="checkbox" checked={dropExisting} onChange={(e) => setDropExisting(e.target.checked)} className="h-4 w-4 accent-brand-600" />
                     Drop existing target tables first
                   </label>
+                  {hasuraAvailable && (
+                    <label className="flex cursor-pointer items-center gap-2 font-medium text-slate-700" title="After the run, track the created tables and views in Hasura so they appear in the GraphQL API.">
+                      <input type="checkbox" checked={trackInHasura} onChange={(e) => setTrackInHasura(e.target.checked)} className="h-4 w-4 accent-brand-600" />
+                      Track tables in Hasura after migration
+                    </label>
+                  )}
                   <span className="text-slate-500">
                     <strong className="tnum font-semibold text-slate-900">{selectedTables.size}</strong> tables ·{' '}
                     <strong className="tnum font-semibold text-slate-900">{totalRows.toLocaleString()}</strong> rows ·{' '}
@@ -482,6 +509,15 @@ export default function MigratePage() {
                     <strong>Errors:</strong>
                     <ul className="mt-1 list-disc pl-5">{summary.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
                   </Alert>
+                )}
+                {summary?.hasura && (
+                  <div className="mb-5">
+                    <Alert tone={summary.hasura.failed.length ? 'amber' : 'green'}>
+                      <strong>Hasura:</strong> tracked {summary.hasura.tracked.length} table(s)
+                      {summary.hasura.alreadyTracked.length ? `, ${summary.hasura.alreadyTracked.length} already tracked` : ''}
+                      {summary.hasura.failed.length ? `, ${summary.hasura.failed.length} failed: ${summary.hasura.failed.map((f) => f.table).join(', ')}` : ''}.
+                    </Alert>
+                  </div>
                 )}
                 <div className="mt-5 flex flex-wrap gap-2">
                   <Button onClick={downloadScript}>

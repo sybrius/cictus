@@ -1,33 +1,15 @@
 import { NextResponse } from 'next/server';
-import { SqlServerConfigSchema, diagnoseSqlServer } from '@/lib/sqlserver';
-import { MysqlConfigSchema, diagnoseMysql } from '@/lib/mysql';
 import { resolveSource } from '@/lib/resolve-connector';
+import { diagnoseSource } from '@/lib/source-dispatch';
 
 // POST /api/source/diagnose — network-only check (DNS + TCP), no login.
 // Tells the user whether the failure is DNS, TCP/port, or login/TLS.
+// For SQLite it checks the file exists and is readable instead.
 export async function POST(req: Request) {
   const body = await req.json().catch(() => null);
   try {
     const { config, sourceType } = resolveSource((body ?? {}) as Record<string, unknown>);
-    if (sourceType === 'mysql') {
-      const parsed = MysqlConfigSchema.safeParse(config);
-      if (!parsed.success) {
-        return NextResponse.json(
-          { ok: false, error: parsed.error.issues.map((i) => i.message).join('; ') },
-          { status: 400 },
-        );
-      }
-      const result = await diagnoseMysql(parsed.data);
-      return NextResponse.json({ ok: result.dns.ok && result.tcp.ok, ...result });
-    }
-    const parsed = SqlServerConfigSchema.safeParse(config);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: parsed.error.issues.map((i) => i.message).join('; ') },
-        { status: 400 },
-      );
-    }
-    const result = await diagnoseSqlServer(parsed.data);
+    const result = await diagnoseSource(sourceType, config);
     return NextResponse.json({ ok: result.dns.ok && result.tcp.ok, ...result });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 400 });

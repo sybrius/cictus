@@ -6,6 +6,9 @@ const nextConfig = {
   // platform — webpack must not try to resolve them all.
   experimental: {
     serverComponentsExternalPackages: ['mssql', 'pg', 'tedious', '@duckdb/node-api', '@duckdb/node-bindings-linux-x64'],
+    // Enables src/instrumentation.ts, which starts the background
+    // scheduler for recurring migrations when the server starts.
+    instrumentationHook: true,
   },
 };
 

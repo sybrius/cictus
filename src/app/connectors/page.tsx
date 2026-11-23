@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Cloud,
   Database,
+  FileUp,
   HardDrive,
   Pencil,
   PlugZap,
@@ -15,13 +16,14 @@ import {
 } from 'lucide-react';
 import { Alert, Badge, Button, Card, CardHeader, EmptyState, Field, PageHeader, Toggle, inputCls } from '@/components/ui';
 
-type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql';
+type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql' | 'postgres-source' | 'oracle' | 'sqlite';
 
 interface Connector {
   id: string; name: string; type: ConnectorType; kind: string;
   projectRef: string; region: string; host: string; port: number;
   database: string; user: string; connectionString: string;
   instance: string; encrypt: boolean; trustCert: boolean;
+  service: string; filePath: string; hasuraEndpoint: string; hasHasuraSecret: boolean;
   lastTestedAt: string | null; lastTestOk: boolean | null; lastTestMessage: string | null;
 }
 
@@ -31,6 +33,9 @@ const TYPE_META: Record<ConnectorType, { label: string; hint: string; kind: 'sou
   postgres: { label: 'PostgreSQL (generic)', hint: 'Any Postgres server: host, port (5432), database, user and password — or paste a full connection string.', kind: 'target' },
   sqlserver: { label: 'SQL Server', hint: 'Source database: host, port (1433), database, user and password. Named instance goes in Instance; leave Port at 1433 for a named instance.', kind: 'source' },
   mysql: { label: 'MySQL', hint: 'Source database: host, port (3306), database, user and password. Enable SSL only if the server requires it (most local / Docker setups do not).', kind: 'source' },
+  'postgres-source': { label: 'PostgreSQL (source)', hint: 'A Postgres database as a migration source: paste its connection string (postgres://user:…@host:5432/db). Same engine, different database — or a different Postgres server entirely.', kind: 'source' },
+  oracle: { label: 'Oracle', hint: 'Oracle 12c+ as a migration source (thin driver — no Oracle client needed). Host, port (1521), service name, and the schema-owner user and password. Only tables owned by that user are migrated.', kind: 'source' },
+  sqlite: { label: 'SQLite (file)', hint: 'A local .sqlite / .db file: give the path on the machine the app runs on. The file is opened read-only; tables land in the target\'s public schema.', kind: 'source' },
 };
 
 const TYPE_ICON: Record<ConnectorType, typeof Database> = {
@@ -39,6 +44,9 @@ const TYPE_ICON: Record<ConnectorType, typeof Database> = {
   postgres: Database,
   sqlserver: HardDrive,
   mysql: Database,
+  'postgres-source': Server,
+  oracle: Database,
+  sqlite: FileUp,
 };
 
 const TYPE_TILE: Record<ConnectorType, string> = {
@@ -47,12 +55,16 @@ const TYPE_TILE: Record<ConnectorType, string> = {
   postgres: 'bg-sky-50 text-sky-600',
   sqlserver: 'bg-blue-50 text-blue-600',
   mysql: 'bg-orange-50 text-orange-600',
+  'postgres-source': 'bg-sky-50 text-sky-600',
+  oracle: 'bg-red-50 text-red-600',
+  sqlite: 'bg-amber-50 text-amber-600',
 };
 
 const EMPTY: Record<string, string | number | boolean> = {
   name: '', type: 'nhost', projectRef: '', region: 'eu-central-1', host: '', port: 5432,
   database: 'postgres', user: 'postgres', password: '', connectionString: '',
   instance: '', encrypt: true, trustCert: true, ssl: false,
+  service: '', filePath: '', hasuraAdminSecret: '', hasuraEndpoint: '',
 };
 
 export default function ConnectorsPage() {
@@ -78,7 +90,8 @@ export default function ConnectorsPage() {
     setForm((f) => ({ ...f, [k]: e.target.type === 'checkbox' ? (e.target as HTMLInputElement).checked : e.target.type === 'number' ? Number(e.target.value) : e.target.value }));
 
   function startAdd(type: ConnectorType) {
-    setForm({ ...EMPTY, type, port: type === 'sqlserver' ? 1433 : type === 'mysql' ? 3306 : 5432, database: type === 'sqlserver' || type === 'mysql' ? '' : 'postgres', user: type === 'sqlserver' ? 'sa' : type === 'mysql' ? 'root' : 'postgres' });
+    const port = type === 'sqlserver' ? 1433 : type === 'mysql' ? 3306 : type === 'oracle' ? 1521 : type === 'sqlite' ? 0 : 5432;
+    setForm({ ...EMPTY, type, port, database: type === 'sqlserver' || type === 'mysql' ? '' : type === 'oracle' ? '' : 'postgres', user: type === 'sqlserver' ? 'sa' : type === 'mysql' ? 'root' : 'postgres' });
     setEditingId(null);
     setShowForm(true);
     setMessage(null); setError(null);
@@ -90,6 +103,7 @@ export default function ConnectorsPage() {
       name: c.name, type: c.type, projectRef: c.projectRef, region: c.region || 'eu-central-1',
       host: c.host, port: c.port, database: c.database, user: c.user, password: '',
       connectionString: c.connectionString, instance: c.instance, encrypt: c.encrypt, trustCert: c.trustCert, ssl: (c as { ssl?: boolean }).ssl ?? false,
+      service: c.service ?? '', filePath: c.filePath ?? '', hasuraAdminSecret: '', hasuraEndpoint: c.hasuraEndpoint ?? '',
     });
     setEditingId(c.id);
     setShowForm(true);
@@ -118,6 +132,14 @@ export default function ConnectorsPage() {
     await load();
   }
 
+  async function testHasura(id: string) {
+    setTestingId(id); setMessage(null);
+    const r = await fetch('/api/hasura/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+    const j = await r.json();
+    setTestingId(null);
+    setMessage(j.ok ? 'Hasura test passed — endpoint and admin secret work.' : `Hasura test failed: ${j.error ?? 'unknown error'}`);
+  }
+
   async function remove(id: string, name: string) {
     if (!confirm(`Delete connector “${name}”?`)) return;
     await fetch(`/api/connectors?id=${id}`, { method: 'DELETE' });
@@ -132,7 +154,7 @@ export default function ConnectorsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Connectors"
-        subtitle="Named, reusable connections. Add a SQL Server or MySQL source once, and NHost, Supabase or PostgreSQL targets — then pick them in the migration wizard instead of re-typing credentials."
+        subtitle="Named, reusable connections. Add a SQL Server, MySQL, PostgreSQL, Oracle or SQLite source once, and NHost, Supabase or PostgreSQL targets — then pick them in the migration wizard instead of re-typing credentials."
         actions={
           <div className="flex flex-wrap gap-2">
             {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => (
@@ -155,7 +177,7 @@ export default function ConnectorsPage() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Name"><input className={inputCls} value={String(form.name)} onChange={set('name')} placeholder="e.g. NHost production" required /></Field>
               <Field label="Type">
-                <select className={inputCls} value={type} onChange={(e) => { const t = e.target.value as ConnectorType; setForm((f) => ({ ...f, type: t, port: t === 'sqlserver' ? 1433 : t === 'mysql' ? 3306 : 5432 })); }}>
+                <select className={inputCls} value={type} onChange={(e) => { const t = e.target.value as ConnectorType; setForm((f) => ({ ...f, type: t, port: t === 'sqlserver' ? 1433 : t === 'mysql' ? 3306 : t === 'oracle' ? 1521 : t === 'sqlite' ? 0 : 5432 })); }}>
                   {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => <option key={t} value={t}>{TYPE_META[t].label}</option>)}
                 </select>
               </Field>
@@ -167,17 +189,42 @@ export default function ConnectorsPage() {
                   {type === 'nhost' && <Field label="Region"><input className={inputCls} value={String(form.region)} onChange={set('region')} placeholder="eu-central-1" /></Field>}
                 </>
               )}
-              <Field label={`Host${(type === 'sqlserver' || type === 'mysql') ? '' : ' (optional if project ref / connection string is given)'}`}>
-                <input className={inputCls} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'QYLA' : type === 'mysql' ? 'localhost' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} />
-              </Field>
-              <Field label="Port"><input className={inputCls} type="number" value={Number(form.port)} onChange={set('port')} /></Field>
-              <Field label="Database"><input className={inputCls} value={String(form.database)} onChange={set('database')} /></Field>
-              <Field label="User"><input className={inputCls} value={String(form.user)} onChange={set('user')} /></Field>
-              <Field label={`Password${editingId ? ' (leave blank to keep the saved one)' : ''}`}>
-                <input className={inputCls} type="password" value={String(form.password)} onChange={set('password')} autoComplete="new-password" />
-              </Field>
+              {type === 'sqlite' ? (
+                <div className="sm:col-span-2">
+                  <Field label="SQLite file path" hint="The path on the machine the app runs on. The file is opened read-only.">
+                    <input className={`${inputCls} font-mono`} value={String(form.filePath)} onChange={set('filePath')} placeholder="C:\Data\mydb.sqlite" />
+                  </Field>
+                </div>
+              ) : (
+                <>
+                  <Field label={`Host${(type === 'sqlserver' || type === 'mysql' || type === 'oracle') ? '' : ' (optional if project ref / connection string is given)'}`}>
+                    <input className={inputCls} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'QYLA' : type === 'mysql' ? 'localhost' : type === 'oracle' ? 'oracle-host' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} />
+                  </Field>
+                  <Field label="Port"><input className={inputCls} type="number" value={Number(form.port)} onChange={set('port')} /></Field>
+                  {type === 'oracle' ? (
+                    <Field label="Service name"><input className={inputCls} value={String(form.service)} onChange={set('service')} placeholder="ORCLPDB1" /></Field>
+                  ) : type !== 'postgres-source' && (
+                    <Field label="Database"><input className={inputCls} value={String(form.database)} onChange={set('database')} /></Field>
+                  )}
+                  {type !== 'postgres-source' && (
+                    <>
+                      <Field label="User"><input className={inputCls} value={String(form.user)} onChange={set('user')} /></Field>
+                      <Field label={`Password${editingId ? ' (leave blank to keep the saved one)' : ''}`}>
+                        <input className={inputCls} type="password" value={String(form.password)} onChange={set('password')} autoComplete="new-password" />
+                      </Field>
+                    </>
+                  )}
+                </>
+              )}
               {type === 'sqlserver' && <Field label="Instance (optional)"><input className={inputCls} value={String(form.instance)} onChange={set('instance')} placeholder="SQLEXPRESS" /></Field>}
-              {type !== 'sqlserver' && type !== 'mysql' && (
+              {(type === 'postgres-source') && (
+                <div className="sm:col-span-2">
+                  <Field label="Connection string" hint="The source database's connection string.">
+                    <input className={inputCls} type="password" value={String(form.connectionString)} onChange={set('connectionString')} placeholder="postgres://user:password@host:5432/database" autoComplete="new-password" />
+                  </Field>
+                </div>
+              )}
+              {type !== 'sqlserver' && type !== 'mysql' && type !== 'oracle' && type !== 'sqlite' && type !== 'postgres-source' && (
                 <div className="sm:col-span-2">
                   <Field label="Connection string (optional — overrides host/port/user above)">
                     <input className={inputCls} type="password" value={String(form.connectionString)} onChange={set('connectionString')} placeholder="postgres://postgres:…@host:5432/postgres" autoComplete="new-password" />
@@ -185,6 +232,25 @@ export default function ConnectorsPage() {
                 </div>
               )}
             </div>
+            {(type === 'nhost' || type === 'postgres') && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <p className="mb-3 text-sm font-semibold text-slate-800">Hasura auto-track (optional)</p>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field
+                    label={`Hasura admin secret${editingId ? ' (leave blank to keep the saved one)' : ''}`}
+                    hint="From the NHost dashboard (Hasura settings) — enables “Track tables in Hasura after migration”. Stored like the password, never shown back."
+                  >
+                    <input className={inputCls} type="password" value={String(form.hasuraAdminSecret)} onChange={set('hasuraAdminSecret')} autoComplete="new-password" />
+                  </Field>
+                  <Field
+                    label="Hasura endpoint (optional override)"
+                    hint={type === 'nhost' ? 'Leave blank to use https://<subdomain>.hasura.<region>.nhost.run' : 'Your Hasura base URL, e.g. https://hasura.example.com'}
+                  >
+                    <input className={inputCls} value={String(form.hasuraEndpoint)} onChange={set('hasuraEndpoint')} placeholder={type === 'nhost' ? 'https://<subdomain>.hasura.<region>.nhost.run' : 'https://hasura.example.com'} />
+                  </Field>
+                </div>
+              </div>
+            )}
             {type === 'sqlserver' && (
               <div className="grid gap-2 sm:grid-cols-2">
                 <Toggle checked={Boolean(form.encrypt)} onChange={(checked) => setForm((f) => ({ ...f, encrypt: checked }))} label="Encryption (TLS)" />
@@ -255,11 +321,20 @@ export default function ConnectorsPage() {
                             )}
                           </div>
                           <div className="mt-2 truncate font-mono text-xs text-slate-500">
-                            {c.projectRef ? `${c.projectRef} · ` : ''}{c.host ? `${c.host}:${c.port}` : ''}{c.database ? ` / ${c.database}` : ''}
+                            {c.type === 'sqlite'
+                              ? (c.filePath || 'SQLite file')
+                              : c.type === 'oracle'
+                                ? `${c.host}:${c.port} / ${c.service}`
+                                : `${c.projectRef ? `${c.projectRef} · ` : ''}${c.host ? `${c.host}:${c.port}` : ''}${c.database ? ` / ${c.database}` : ''}`}
                           </div>
                           {c.lastTestMessage && <div className="mt-1 truncate text-xs text-slate-400">{c.lastTestMessage}</div>}
-                          <div className="mt-3.5 flex gap-2">
+                          <div className="mt-3.5 flex flex-wrap gap-2">
                             <Button size="sm" onClick={() => test(c.id)} loading={testingId === c.id}>{testingId === c.id ? 'Testing…' : 'Test'}</Button>
+                            {(c.type === 'nhost' || c.type === 'postgres') && c.hasHasuraSecret && (
+                              <Button size="sm" variant="secondary" onClick={() => testHasura(c.id)} loading={testingId === c.id}>
+                                Test Hasura
+                              </Button>
+                            )}
                             <Button size="sm" variant="secondary" onClick={() => startEdit(c)}>
                               <Pencil className="h-3.5 w-3.5" /> Edit
                             </Button>

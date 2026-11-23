@@ -2,7 +2,15 @@
 
 import { AlertTriangle, KeyRound } from 'lucide-react';
 import type { DatabaseSchema } from '@/lib/sqlserver';
-import { mapSourceType } from '@/lib/type-map';
+import { mapSourceType, type SourceKind } from '@/lib/type-map';
+
+const SOURCE_LABELS: Record<SourceKind, string> = {
+  sqlserver: 'SQL Server',
+  mysql: 'MySQL',
+  postgres: 'PostgreSQL',
+  oracle: 'Oracle',
+  sqlite: 'SQLite',
+};
 
 const PG_TYPES = [
   'smallint', 'integer', 'bigint', 'boolean', 'numeric(18,2)', 'numeric(19,4)',
@@ -21,7 +29,7 @@ export function TypeMappingTable({
   selection: { tables: Set<string> };
   overrides: Record<string, string>;
   onOverride: (key: string, pgType: string) => void;
-  sourceType?: 'sqlserver' | 'mysql';
+  sourceType?: SourceKind;
 }) {
   const tables = schema.tables.filter((t) => selection.tables.has(`${t.schema}.${t.name}`));
   return (
@@ -30,7 +38,7 @@ export function TypeMappingTable({
         <thead className="sticky top-0 z-10 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-4 py-2.5 font-semibold">Column</th>
-            <th className="px-4 py-2.5 font-semibold">{sourceType === 'mysql' ? 'MySQL' : 'SQL Server'}</th>
+            <th className="px-4 py-2.5 font-semibold">{SOURCE_LABELS[sourceType]}</th>
             <th className="px-4 py-2.5 font-semibold">Postgres</th>
             <th className="px-4 py-2.5 font-semibold">Warning</th>
           </tr>

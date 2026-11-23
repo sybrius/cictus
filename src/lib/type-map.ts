@@ -18,6 +18,9 @@ export interface MappedType {
   needsReview?: boolean;
 }
 
+/** Every migration source the engine supports. */
+export type SourceKind = 'sqlserver' | 'mysql' | 'postgres' | 'oracle' | 'sqlite';
+
 export interface SqlServerColumnType {
   dataType: string; // e.g. nvarchar, decimal, datetime2
   maxLength: number | null; // CHARACTER_MAXIMUM_LENGTH (-1 = MAX)
@@ -293,9 +296,19 @@ export const KNOWN_MYSQL_TYPES = [
 ] as const;
 
 /** Dispatch on the migration source. `col` is the shared ColumnInfo
- *  shape (dataType / lengths / sourceExtra = MySQL COLUMN_TYPE). */
+ *  shape (dataType / lengths / sourceExtra):
+ *  - sqlserver: dataType is the T-SQL type, sourceExtra unused.
+ *  - mysql: sourceExtra is COLUMN_TYPE (`tinyint(1)`, `int unsigned`).
+ *  - postgres: dataType is information_schema's data_type
+ *    (`character varying`, `timestamp with time zone`, `ARRAY`),
+ *    sourceExtra is udt_name (`_int4`, `geography`).
+ *  - oracle: dataType is ALL_TAB_COLUMNS.DATA_TYPE (`VARCHAR2`,
+ *    `NUMBER`, `TIMESTAMP(6) WITH TIME ZONE`), lengths from
+ *    CHAR_LENGTH / DATA_PRECISION / DATA_SCALE.
+ *  - sqlite: dataType is the declared type's base word, sourceExtra
+ *    is the full declared type (`VARCHAR(255)`, `DECIMAL(10,2)`). */
 export function mapSourceType(
-  source: 'sqlserver' | 'mysql',
+  source: SourceKind,
   col: {
     dataType: string;
     sourceExtra?: string | null;
@@ -305,21 +318,253 @@ export function mapSourceType(
     datetimePrecision: number | null;
   },
 ): MappedType {
-  if (source === 'mysql') {
-    return mapMysqlType({
-      dataType: col.dataType,
-      columnType: col.sourceExtra,
-      maxLength: col.maxLength,
-      numericPrecision: col.numericPrecision,
-      numericScale: col.numericScale,
-      datetimePrecision: col.datetimePrecision,
-    });
+  switch (source) {
+    case 'mysql':
+      return mapMysqlType({
+        dataType: col.dataType,
+        columnType: col.sourceExtra,
+        maxLength: col.maxLength,
+        numericPrecision: col.numericPrecision,
+        numericScale: col.numericScale,
+        datetimePrecision: col.datetimePrecision,
+      });
+    case 'postgres':
+      return mapPostgresType({
+        dataType: col.dataType,
+        udtName: col.sourceExtra,
+        maxLength: col.maxLength,
+        numericPrecision: col.numericPrecision,
+        numericScale: col.numericScale,
+        datetimePrecision: col.datetimePrecision,
+      });
+    case 'oracle':
+      return mapOracleType({
+        dataType: col.dataType,
+        maxLength: col.maxLength,
+        numericPrecision: col.numericPrecision,
+        numericScale: col.numericScale,
+        datetimePrecision: col.datetimePrecision,
+      });
+    case 'sqlite':
+      return mapSqliteType({ declaredType: col.sourceExtra ?? col.dataType });
+    default:
+      return mapSqlServerType({
+        dataType: col.dataType,
+        maxLength: col.maxLength,
+        numericPrecision: col.numericPrecision,
+        numericScale: col.numericScale,
+        datetimePrecision: col.datetimePrecision,
+      });
   }
-  return mapSqlServerType({
-    dataType: col.dataType,
-    maxLength: col.maxLength,
-    numericPrecision: col.numericPrecision,
-    numericScale: col.numericScale,
-    datetimePrecision: col.datetimePrecision,
-  });
+}
+
+// ── PostgreSQL -> PostgreSQL ─────────────────────────────────────────
+
+/**
+ * A Postgres source already speaks Postgres, so this is mostly
+ * normalisation: information_schema's `character varying` becomes
+ * `varchar(n)`, `timestamp with time zone` becomes `timestamptz`,
+ * `ARRAY` becomes the element type with `[]` (from udt_name).
+ * User-defined types (extensions, enums, domains) fall back to text
+ * with a warning, except PostGIS geography/geometry which pass
+ * through with the usual PostGIS note.
+ */
+export function mapPostgresType(col: {
+  dataType: string;
+  udtName?: string | null;
+  maxLength: number | null;
+  numericPrecision: number | null;
+  numericScale: number | null;
+  datetimePrecision: number | null;
+}): MappedType {
+  // udt_name uses Postgres internal names (int4, bool, bpchar) —
+  // normalise them to the information_schema names the switch uses.
+  const internal: Record<string, string> = {
+    int2: 'smallint', int4: 'integer', int8: 'bigint',
+    float4: 'real', float8: 'double precision', bool: 'boolean',
+    bpchar: 'character', varchar: 'character varying',
+  };
+  const t = internal[col.dataType.toLowerCase()] ?? col.dataType.toLowerCase();
+  const udt = (col.udtName ?? '').toLowerCase();
+  const len = col.maxLength;
+  const p = col.numericPrecision;
+  const s = col.numericScale;
+
+  switch (t) {
+    case 'smallint': return { pgType: 'smallint' };
+    case 'integer': return { pgType: 'integer' };
+    case 'bigint': return { pgType: 'bigint' };
+    case 'numeric': return { pgType: `numeric(${p ?? 10},${s ?? 0})` };
+    case 'real': return { pgType: 'real' };
+    case 'double precision': return { pgType: 'double precision' };
+    case 'money': return { pgType: 'money' };
+    case 'boolean': return { pgType: 'boolean' };
+    case 'date': return { pgType: 'date' };
+    case 'time without time zone': return { pgType: `time(${col.datetimePrecision ?? 6})` };
+    case 'time with time zone': return { pgType: `timetz(${col.datetimePrecision ?? 6})` };
+    case 'timestamp without time zone': return { pgType: 'timestamp' };
+    case 'timestamp with time zone': return { pgType: 'timestamptz' };
+    case 'interval': return { pgType: 'interval' };
+    case 'character': return { pgType: `char(${len ?? 1})` };
+    case 'character varying': return { pgType: len ? `varchar(${len})` : 'text' };
+    case 'text': return { pgType: 'text' };
+    case 'bytea': return { pgType: 'bytea' };
+    case 'uuid': return { pgType: 'uuid' };
+    case 'json': return { pgType: 'json' };
+    case 'jsonb': return { pgType: 'jsonb' };
+    case 'xml': return { pgType: 'xml' };
+    case 'bit': return { pgType: 'bit(1)' };
+    case 'bit varying': return { pgType: 'varbit' };
+    case 'array': {
+      // udt_name is the array type, e.g. _int4, _text, _varchar.
+      const base = udt.replace(/^_/, '');
+      const inner = mapPostgresType({ dataType: base, maxLength: len, numericPrecision: p, numericScale: s, datetimePrecision: col.datetimePrecision });
+      return { pgType: `${inner.pgType}[]`, warning: inner.warning };
+    }
+    case 'user-defined':
+      if (udt === 'geography' || udt === 'geometry') {
+        return {
+          pgType: udt,
+          needsReview: true,
+          warning: 'Requires the PostGIS extension (CREATE EXTENSION postgis) on the target. NHost Postgres does not enable PostGIS by default — enable it in the NHost dashboard first.',
+        };
+      }
+      return {
+        pgType: 'text',
+        needsReview: true,
+        warning: `User-defined type "${col.udtName ?? col.dataType}" (enum, domain or extension type) — mapped to text. Casts and checks on it do not carry over; review before migrating.`,
+      };
+    default:
+      return {
+        pgType: 'text',
+        needsReview: true,
+        warning: `Unknown Postgres type "${col.dataType}" — defaulted to text. Review before migrating.`,
+      };
+  }
+}
+
+// ── Oracle -> PostgreSQL ─────────────────────────────────────────────
+
+export function mapOracleType(col: {
+  dataType: string;
+  maxLength: number | null;
+  numericPrecision: number | null;
+  numericScale: number | null;
+  datetimePrecision: number | null;
+}): MappedType {
+  const t = col.dataType.toUpperCase().replace(/\s*\(.*\)$/, '');
+  const len = col.maxLength;
+  const p = col.numericPrecision;
+  const s = col.numericScale ?? 0;
+
+  switch (t) {
+    case 'NUMBER': {
+      // NUMBER with no precision/scale is Oracle's "any number".
+      if (p === null || p === undefined) return { pgType: 'numeric' };
+      if (s === 0) {
+        if (p <= 4) return { pgType: 'smallint' };
+        if (p <= 9) return { pgType: 'integer' };
+        if (p <= 18) return { pgType: 'bigint' };
+        return { pgType: 'numeric' };
+      }
+      return { pgType: `numeric(${p},${s})` };
+    }
+    case 'BINARY_FLOAT': return { pgType: 'real' };
+    case 'BINARY_DOUBLE': return { pgType: 'double precision' };
+    case 'FLOAT': return { pgType: 'double precision' };
+    case 'VARCHAR2':
+    case 'VARCHAR': return { pgType: len ? `varchar(${len})` : 'text' };
+    case 'NVARCHAR2':
+    case 'NVARCHAR': return { pgType: len ? `varchar(${len})` : 'text' };
+    case 'CHAR':
+    case 'NCHAR': return { pgType: `char(${len ?? 1})` };
+    case 'CLOB':
+    case 'NCLOB': return { pgType: 'text' };
+    case 'LONG': return { pgType: 'text', warning: 'LONG is deprecated in Oracle; mapped to text.' };
+    case 'DATE': return { pgType: 'timestamp' };
+    case 'TIMESTAMP': return { pgType: 'timestamp' };
+    case 'TIMESTAMP WITH TIME ZONE': return { pgType: 'timestamptz' };
+    case 'TIMESTAMP WITH LOCAL TIME ZONE':
+      return {
+        pgType: 'timestamptz',
+        warning: 'TIMESTAMP WITH LOCAL TIME ZONE is stored in the database timezone in Oracle; timestamptz normalises to UTC. The instant is preserved, the session-zone behaviour is not.',
+      };
+    case 'INTERVAL YEAR TO MONTH':
+    case 'INTERVAL DAY TO SECOND': return { pgType: 'interval' };
+    case 'RAW':
+    case 'LONG RAW':
+    case 'BLOB': return { pgType: 'bytea' };
+    case 'BFILE':
+      return {
+        pgType: 'text',
+        needsReview: true,
+        warning: 'BFILE is a pointer to a file outside the database — only the file path is copied, not the file itself.',
+      };
+    case 'ROWID':
+    case 'UROWID':
+      return {
+        pgType: 'text',
+        needsReview: true,
+        warning: 'ROWID is a physical address in the Oracle database; it is meaningless in Postgres. Kept as text — consider dropping it.',
+      };
+    case 'XMLTYPE':
+      return { pgType: 'xml', warning: 'Postgres xml does not enforce the Oracle XML schema; validation is lost.' };
+    case 'SDO_GEOMETRY':
+      return {
+        pgType: 'geometry',
+        needsReview: true,
+        warning: 'Oracle Spatial (SDO_GEOMETRY) has no direct Postgres equivalent. Mapped to PostGIS geometry — enable PostGIS on the target and verify the geometry values after migration.',
+      };
+    default:
+      return {
+        pgType: 'text',
+        needsReview: true,
+        warning: `Unknown Oracle type "${col.dataType}" — defaulted to text. Review before migrating.`,
+      };
+  }
+}
+
+// ── SQLite -> PostgreSQL ─────────────────────────────────────────────
+
+/**
+ * SQLite has flexible typing: a column's declared type is free text
+ * ("VARCHAR(255)", "UNSIGNED BIG INT", "DOUBLE PRECISION", "DATETIME")
+ * and the storage class follows affinity rules. Parse the declared
+ * type; fall back to affinity (INT → integer, CHAR/CLOB/TEXT → text,
+ * BLOB/empty → bytea, REAL/FLOA/DOUB → double precision, otherwise
+ * numeric).
+ */
+export function mapSqliteType(col: { declaredType: string }): MappedType {
+  const raw = (col.declaredType ?? '').trim().toUpperCase();
+  if (!raw) return { pgType: 'bytea', warning: 'No declared type — SQLite stores any value here; mapped to bytea. Review before migrating.' };
+  const m = raw.match(/^([A-Z ]+?)(?:\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?$/);
+  const base = (m?.[1] ?? raw).trim();
+  const n1 = m?.[2] ? Number(m[2]) : null;
+  const n2 = m?.[3] ? Number(m[3]) : null;
+
+  if (base === 'BOOLEAN' || base === 'BOOL') return { pgType: 'boolean' };
+  if (base === 'DATE') return { pgType: 'date' };
+  if (base === 'DATETIME') return { pgType: 'timestamp' };
+  if (base === 'TIME') return { pgType: 'time' };
+  if (base === 'TIMESTAMP') return { pgType: 'timestamp' };
+  if (base === 'VARCHAR' || base === 'CHARACTER VARYING') return { pgType: n1 ? `varchar(${n1})` : 'text' };
+  if (base === 'CHAR' || base === 'CHARACTER' || base === 'NCHAR') return { pgType: `char(${n1 ?? 1})` };
+  if (base === 'TEXT' || base === 'CLOB') return { pgType: 'text' };
+  if (base === 'DECIMAL' || base === 'NUMERIC') return { pgType: n1 !== null ? `numeric(${n1},${n2 ?? 0})` : 'numeric' };
+  if (base === 'BIGINT' || base === 'UNSIGNED BIG INT' || base === 'INT8') return { pgType: 'bigint' };
+  if (base === 'SMALLINT' || base === 'INT2') return { pgType: 'smallint' };
+  if (base === 'TINYINT' || base === 'INT1') return { pgType: 'smallint' };
+  if (base === 'MEDIUMINT' || base === 'INT3') return { pgType: 'integer' };
+  if (base === 'DOUBLE' || base === 'DOUBLE PRECISION') return { pgType: 'double precision' };
+  if (base === 'REAL' || base === 'FLOAT') return { pgType: 'double precision' };
+  if (base === 'BLOB') return { pgType: 'bytea' };
+  if (base === 'UUID') return { pgType: 'uuid' };
+  if (base === 'JSON') return { pgType: 'jsonb' };
+
+  // Affinity fallback (SQLite docs, section 3.1).
+  if (base.includes('INT')) return { pgType: 'integer' };
+  if (base.includes('CHAR') || base.includes('CLOB') || base.includes('TEXT')) return { pgType: 'text' };
+  if (base.includes('BLOB') || base === '') return { pgType: 'bytea' };
+  if (base.includes('REAL') || base.includes('FLOA') || base.includes('DOUB')) return { pgType: 'double precision' };
+  return { pgType: 'numeric' };
 }

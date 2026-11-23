@@ -44,6 +44,36 @@ export interface MigrationRun {
   viewsCreated: number;
   viewsTotal: number;
   errorsCount: number;
+  /** 'manual' for wizard runs, 'schedule' for scheduled runs. */
+  trigger?: string | null;
+  /** Display name of the run (schedule name for scheduled runs). */
+  runName?: string | null;
+  scheduleId?: string | null;
+}
+
+/** A recurring migration: a saved source → target pair, a table/view
+ *  selection and a cron expression. The background scheduler
+ *  (src/lib/scheduler.ts) ticks once a minute and runs every
+ *  enabled schedule whose next run is due. */
+export interface Schedule {
+  id: string;
+  name: string;
+  sourceConnectorId: string;
+  targetConnectorId: string;
+  tables: string[];
+  views: string[];
+  includeData: boolean;
+  dropExisting: boolean;
+  useCopy: boolean;
+  /** Track created tables/views in Hasura after each scheduled run. */
+  trackInHasura?: boolean;
+  cron: string;
+  enabled: boolean;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+  lastRunId: string | null;
+  nextRunAt: string | null;
+  createdAt: string;
 }
 
 export interface MigrationTableResult {
@@ -171,6 +201,30 @@ async function ensureSchema(conn: DuckDBConnectionType): Promise<void> {
       scope VARCHAR,
       message VARCHAR
     )`);
+  // Columns added after the first release — keep them optional so
+  // older history files pick them up without a migration script.
+  await conn.run(`ALTER TABLE migrations ADD COLUMN IF NOT EXISTS trigger VARCHAR`);
+  await conn.run(`ALTER TABLE migrations ADD COLUMN IF NOT EXISTS run_name VARCHAR`);
+  await conn.run(`ALTER TABLE migrations ADD COLUMN IF NOT EXISTS schedule_id VARCHAR`);
+  await conn.run(`CREATE TABLE IF NOT EXISTS schedules (
+      id VARCHAR PRIMARY KEY,
+      name VARCHAR,
+      source_connector_id VARCHAR,
+      target_connector_id VARCHAR,
+      tables_json VARCHAR,
+      views_json VARCHAR,
+      include_data BOOLEAN,
+      drop_existing BOOLEAN,
+      use_copy BOOLEAN,
+      cron VARCHAR,
+      enabled BOOLEAN,
+      last_run_at TIMESTAMPTZ,
+      last_status VARCHAR,
+      last_run_id VARCHAR,
+      next_run_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ
+    )`);
+  await conn.run(`ALTER TABLE schedules ADD COLUMN IF NOT EXISTS track_in_hasura BOOLEAN`);
 }
 
 /** Run `fn` on a fresh connection from the shared instance, creating
@@ -200,10 +254,13 @@ export async function recordRunStart(run: {
   targetType: string;
   tablesTotal: number;
   viewsTotal: number;
+  trigger?: 'manual' | 'schedule';
+  runName?: string | null;
+  scheduleId?: string | null;
 }): Promise<void> {
   await withConnection(async (conn) => {
     await conn.run(
-      `INSERT INTO migrations VALUES (${esc(run.id)}, now(), NULL, 'running', ${esc(run.sourceName)}, ${esc(run.targetName)}, ${esc(run.targetType)}, ${run.tablesTotal}, 0, 0, 0, ${run.viewsTotal}, 0)`,
+      `INSERT INTO migrations VALUES (${esc(run.id)}, now(), NULL, 'running', ${esc(run.sourceName)}, ${esc(run.targetName)}, ${esc(run.targetType)}, ${run.tablesTotal}, 0, 0, 0, ${run.viewsTotal}, 0, ${esc(run.trigger ?? 'manual')}, ${run.runName ? esc(run.runName) : 'NULL'}, ${run.scheduleId ? esc(run.scheduleId) : 'NULL'})`,
     );
   });
 }
@@ -242,7 +299,8 @@ export async function listRuns(limit = 50): Promise<MigrationRun[]> {
   return withConnection(async (conn) => {
     const reader = await conn.runAndReadAll(
       `SELECT id, started_at, finished_at, status, source_name, target_name, target_type,
-       tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count
+       tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
+       trigger, run_name, schedule_id
        FROM migrations ORDER BY started_at DESC LIMIT ${limit}`,
     );
     return normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]) as unknown as MigrationRun[];
@@ -257,7 +315,8 @@ export async function getRun(id: string): Promise<{
   return withConnection(async (conn) => {
     const runs = await conn.runAndReadAll(
       `SELECT id, started_at, finished_at, status, source_name, target_name, target_type,
-       tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count
+       tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
+       trigger, run_name, schedule_id
        FROM migrations WHERE id = ${esc(id)}`,
     );
     const rows = runs.getRowObjects() as unknown as MigrationRun[];
@@ -302,5 +361,102 @@ export async function historyStats(): Promise<{
       totalErrors: Number(row.total_errors ?? 0),
       lastRunAt: row.last_run_at ? String(row.last_run_at) : null,
     };
+  });
+}
+
+/* ── Schedules ─────────────────────────────────────────────── */
+
+function scheduleRowToSchedule(row: Record<string, unknown>): Schedule {
+  const parseList = (v: unknown): string[] => {
+    if (Array.isArray(v)) return v as string[];
+    try {
+      const parsed = JSON.parse(String(v ?? '[]'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    id: String(row.id),
+    name: String(row.name ?? ''),
+    sourceConnectorId: String(row.source_connector_id ?? ''),
+    targetConnectorId: String(row.target_connector_id ?? ''),
+    tables: parseList(row.tables_json),
+    views: parseList(row.views_json),
+    includeData: row.include_data !== false,
+    dropExisting: row.drop_existing === true,
+    useCopy: row.use_copy !== false,
+    trackInHasura: row.track_in_hasura === true,
+    cron: String(row.cron ?? ''),
+    enabled: row.enabled !== false,
+    lastRunAt: row.last_run_at ? String(row.last_run_at) : null,
+    lastStatus: row.last_status ? String(row.last_status) : null,
+    lastRunId: row.last_run_id ? String(row.last_run_id) : null,
+    nextRunAt: row.next_run_at ? String(row.next_run_at) : null,
+    createdAt: row.created_at ? String(row.created_at) : '',
+  };
+}
+
+const SCHEDULE_COLS = `id, name, source_connector_id, target_connector_id, tables_json, views_json,
+  include_data, drop_existing, use_copy, track_in_hasura, cron, enabled, last_run_at, last_status, last_run_id,
+  next_run_at, created_at`;
+
+export async function listSchedules(): Promise<Schedule[]> {
+  return withConnection(async (conn) => {
+    const reader = await conn.runAndReadAll(`SELECT ${SCHEDULE_COLS} FROM schedules ORDER BY created_at DESC`);
+    return normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]).map(scheduleRowToSchedule);
+  });
+}
+
+export async function getSchedule(id: string): Promise<Schedule | null> {
+  return withConnection(async (conn) => {
+    const reader = await conn.runAndReadAll(`SELECT ${SCHEDULE_COLS} FROM schedules WHERE id = ${esc(id)}`);
+    const rows = normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]);
+    return rows[0] ? scheduleRowToSchedule(rows[0]) : null;
+  });
+}
+
+/** Insert or replace a schedule (delete + insert keeps it simple and
+ *  avoids relying on ON CONFLICT support). */
+export async function saveSchedule(s: Schedule): Promise<void> {
+  await withConnection(async (conn) => {
+    await conn.run(`DELETE FROM schedules WHERE id = ${esc(s.id)}`);
+    await conn.run(
+      `INSERT INTO schedules
+       (id, name, source_connector_id, target_connector_id, tables_json, views_json,
+        include_data, drop_existing, use_copy, track_in_hasura, cron, enabled,
+        last_run_at, last_status, last_run_id, next_run_at, created_at)
+       VALUES (${esc(s.id)}, ${esc(s.name)}, ${esc(s.sourceConnectorId)}, ${esc(s.targetConnectorId)},
+       ${esc(JSON.stringify(s.tables))}, ${esc(JSON.stringify(s.views))},
+       ${s.includeData}, ${s.dropExisting}, ${s.useCopy}, ${s.trackInHasura ?? false}, ${esc(s.cron)}, ${s.enabled},
+       ${s.lastRunAt ? esc(s.lastRunAt) : 'NULL'}, ${s.lastStatus ? esc(s.lastStatus) : 'NULL'},
+       ${s.lastRunId ? esc(s.lastRunId) : 'NULL'}, ${s.nextRunAt ? esc(s.nextRunAt) : 'NULL'},
+       ${s.createdAt ? esc(s.createdAt) : 'now()'})`,
+    );
+  });
+}
+
+export async function deleteSchedule(id: string): Promise<void> {
+  await withConnection(async (conn) => {
+    await conn.run(`DELETE FROM schedules WHERE id = ${esc(id)}`);
+  });
+}
+
+export async function updateScheduleRun(id: string, patch: {
+  lastRunAt?: string | null;
+  lastStatus?: string | null;
+  lastRunId?: string | null;
+  nextRunAt?: string | null;
+  enabled?: boolean;
+}): Promise<void> {
+  await withConnection(async (conn) => {
+    const sets: string[] = [];
+    if (patch.lastRunAt !== undefined) sets.push(`last_run_at = ${patch.lastRunAt ? esc(patch.lastRunAt) : 'NULL'}`);
+    if (patch.lastStatus !== undefined) sets.push(`last_status = ${patch.lastStatus ? esc(patch.lastStatus) : 'NULL'}`);
+    if (patch.lastRunId !== undefined) sets.push(`last_run_id = ${patch.lastRunId ? esc(patch.lastRunId) : 'NULL'}`);
+    if (patch.nextRunAt !== undefined) sets.push(`next_run_at = ${patch.nextRunAt ? esc(patch.nextRunAt) : 'NULL'}`);
+    if (patch.enabled !== undefined) sets.push(`enabled = ${patch.enabled}`);
+    if (!sets.length) return;
+    await conn.run(`UPDATE schedules SET ${sets.join(', ')} WHERE id = ${esc(id)}`);
   });
 }

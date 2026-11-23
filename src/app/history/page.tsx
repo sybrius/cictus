@@ -19,6 +19,8 @@ interface Run {
   views_created: number;
   views_total: number;
   errors_count: number;
+  trigger?: string | null;
+  run_name?: string | null;
 }
 
 interface Detail {
@@ -99,9 +101,13 @@ export default function HistoryPage() {
                 <div style={{ '--fade-delay': `${Math.min(idx, 8) * 40}ms` } as React.CSSProperties}>
                   <button onClick={() => toggle(r.id)} className="flex w-full flex-wrap items-center gap-x-4 gap-y-2 px-5 py-4 text-left text-sm transition-colors">
                     <span className="min-w-0 flex-1">
-                      <span className="block font-semibold text-slate-900">{r.startedAt ? new Date(r.startedAt).toLocaleString() : '—'}</span>
+                      <span className="block font-semibold text-slate-900">
+                        {r.run_name ?? (r.startedAt ? new Date(r.startedAt).toLocaleString() : '—')}
+                        {r.trigger === 'schedule' && <Badge tone="violet" className="ml-2 align-middle">Scheduled</Badge>}
+                      </span>
                       <span className="mt-0.5 block font-mono text-xs text-slate-500">
                         {r.source_name} → {r.target_name} <span className="text-slate-400">({r.target_type})</span>
+                        {r.run_name && r.startedAt ? ` · ${new Date(r.startedAt).toLocaleString()}` : ''}
                       </span>
                     </span>
                     <span className="tnum hidden text-slate-600 md:block">

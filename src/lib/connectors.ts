@@ -23,7 +23,7 @@ import crypto from 'crypto';
  * form `postgres://postgres:<password>@<subdomain>.db.<region>.nhost.run:5432/postgres`.
  */
 
-export type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql';
+export type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql' | 'postgres-source' | 'oracle' | 'sqlite';
 export type ConnectorKind = 'source' | 'target';
 
 export interface Connector {
@@ -46,6 +46,19 @@ export interface Connector {
   instance: string;
   encrypt: boolean;
   trustCert: boolean;
+  /** Oracle only: service name (or SID). */
+  service: string;
+  /** SQLite only: path to the .sqlite / .db file on this machine. */
+  filePath: string;
+  /** Hasura admin secret for auto-tracking tables after migration
+   *  (NHost targets, or a plain Postgres target with a Hasura
+   *  endpoint below). Stored like the password — never sent to the
+   *  browser, never committed. */
+  hasuraAdminSecret: string;
+  /** Optional Hasura endpoint override (plain Postgres targets only;
+   *  NHost derives https://<subdomain>.hasura.<region>.nhost.run).
+   *  May be a base URL (…nhost.run) or a full …/v1/metadata URL. */
+  hasuraEndpoint: string;
   createdAt: string;
   updatedAt: string;
   lastTestedAt: string | null;
@@ -80,6 +93,21 @@ export const CONNECTOR_TYPES: Record<ConnectorType, { label: string; kind: Conne
     label: 'MySQL',
     kind: 'source',
     hint: 'Source database. Host, port (3306), database, user and password. Enable SSL only if the server requires it.',
+  },
+  'postgres-source': {
+    label: 'PostgreSQL (source)',
+    kind: 'source',
+    hint: 'A Postgres database as a migration source: paste its connection string (postgres://user:…@host:5432/db). Same engine, different database — or a different Postgres server entirely.',
+  },
+  oracle: {
+    label: 'Oracle',
+    kind: 'source',
+    hint: 'Oracle 12c+ as a migration source (thin driver — no Oracle client needed). Host, port (1521), service name, and the schema-owner user and password. Only tables owned by that user are migrated.',
+  },
+  sqlite: {
+    label: 'SQLite (file)',
+    kind: 'source',
+    hint: 'A local .sqlite / .db file. Give the path on the machine the app runs on, or upload the file in the wizard. The file is opened read-only.',
   },
 };
 
@@ -142,9 +170,11 @@ export function markTested(id: string, ok: boolean, message: string): void {
   saveAll(list);
 }
 
-/** The stored record without the password, for sending to the browser. */
-export function publicConnector(c: Connector): Omit<Connector, 'password'> & { password: '' } {
-  return { ...c, password: '' };
+/** The stored record without the password or Hasura secret, for
+ *  sending to the browser. `hasHasuraSecret` tells the UI whether a
+ *  secret is saved, without revealing it. */
+export function publicConnector(c: Connector): Omit<Connector, 'password' | 'hasuraAdminSecret'> & { password: ''; hasuraAdminSecret: ''; hasHasuraSecret: boolean } {
+  return { ...c, password: '', hasuraAdminSecret: '', hasHasuraSecret: Boolean(c.hasuraAdminSecret) };
 }
 
 /** Build the Postgres connection string for a target connector. */
@@ -162,9 +192,7 @@ export function targetConnectionString(c: Connector): string {
   return `postgres://${encodeURIComponent(c.user)}:${pw}@${c.host}:${c.port || 5432}/${c.database || 'postgres'}`;
 }
 
-/** Source config for a connector, in the wizard's form shape.
- *  MySQL connectors return ssl + sourceType 'mysql'; SQL Server ones
- *  return the TLS / instance fields with sourceType 'sqlserver'. */
+/** Source config for a connector, in the wizard's form shape. */
 export function sourceFormValues(c: Connector) {
   if (c.type === 'mysql') {
     return {
@@ -177,7 +205,61 @@ export function sourceFormValues(c: Connector) {
       encrypt: false,
       instance: '',
       ssl: c.ssl,
+      connectionString: '',
+      service: '',
+      filePath: '',
       sourceType: 'mysql' as const,
+    };
+  }
+  if (c.type === 'postgres-source') {
+    return {
+      host: c.host,
+      port: c.port || 5432,
+      user: c.user,
+      password: c.password,
+      database: c.database,
+      trustCert: false,
+      encrypt: false,
+      instance: '',
+      ssl: c.ssl,
+      connectionString: c.connectionString,
+      service: '',
+      filePath: '',
+      sourceType: 'postgres' as const,
+    };
+  }
+  if (c.type === 'oracle') {
+    return {
+      host: c.host,
+      port: c.port || 1521,
+      user: c.user,
+      password: c.password,
+      database: c.database,
+      trustCert: false,
+      encrypt: false,
+      instance: '',
+      ssl: false,
+      connectionString: '',
+      service: c.service,
+      filePath: '',
+      sourceType: 'oracle' as const,
+    };
+  }
+  if (c.type === 'sqlite') {
+    return {
+      host: '',
+      port: 0,
+      user: '',
+      password: '',
+      database: '',
+      trustCert: false,
+      encrypt: false,
+      instance: '',
+      ssl: false,
+      connectionString: '',
+      service: '',
+      filePath: c.filePath,
+      sourceType: 'sqlite' as const,
     };
   }
   return {
@@ -190,6 +272,9 @@ export function sourceFormValues(c: Connector) {
     encrypt: c.encrypt,
     instance: c.instance,
     ssl: false,
+    connectionString: '',
+    service: '',
+    filePath: '',
     sourceType: 'sqlserver' as const,
   };
 }
