@@ -199,8 +199,18 @@ export default function MigratePage() {
       }
       setStep(5);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      addLog(`Migration failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      // A dropped browser connection ("Failed to fetch" / network
+      // error) does not necessarily mean the server stopped: the run
+      // keeps going server-side and is recorded in History, and a
+      // re-run is safe (CREATE TABLE IF NOT EXISTS + ON CONFLICT DO
+      // NOTHING). Say so instead of leaving "Migration failed" bare.
+      if (/failed to fetch|networkerror|network error|load failed/i.test(msg)) {
+        addLog('Migration failed: the browser lost its connection to the dev server (network error). The run may still be finishing server-side — check History / Dashboard for the recorded result before re-running. Re-running is safe.', 'error');
+      } else {
+        addLog(`Migration failed: ${msg}`, 'error');
+      }
     } finally { setMigrating(false); }
   }
 

@@ -84,7 +84,25 @@ export async function POST(req: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
-      const send = (e: OutEvent) => controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+      // A failed enqueue must never kill the migration. controller.enqueue
+      // throws once the stream is closed or errored (e.g. the browser
+      // connection drops mid-run) — and every log/progress call in the
+      // phases below goes through send(), so one throw used to poison
+      // the whole run: the outer catch's sends threw too, then
+      // controller.close() in finally threw, the stream errored, and
+      // the browser reported "network error" instead of the per-table
+      // skip-and-continue behaviour. Now a dead stream just stops
+      // receiving events; the migration keeps going server-side and
+      // its result is still recorded in the DuckDB history.
+      let streamAlive = true;
+      const send = (e: OutEvent) => {
+        if (!streamAlive) return;
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+        } catch {
+          streamAlive = false;
+        }
+      };
       const log = (message: string) => send({ type: 'log', message });
       const errors: string[] = [];
       const pool = createTargetPool(target);
@@ -126,10 +144,19 @@ export async function POST(req: Request) {
         send({ type: 'phase', phase: 'schema' });
         if (dropExisting) {
           log('Dropping existing target tables (dropExisting=true)…');
-          await executeDdlInTransaction(
-            pool,
-            tables.map((t) => `DROP TABLE IF EXISTS "${t.schema === 'dbo' ? 'public' : t.schema}"."${t.name}" CASCADE;`),
-          );
+          try {
+            await executeDdlInTransaction(
+              pool,
+              tables.map((t) => `DROP TABLE IF EXISTS "${t.schema === 'dbo' ? 'public' : t.schema}"."${t.name}" CASCADE;`),
+            );
+          } catch (err) {
+            // A failed DROP used to escape every per-table catch and
+            // abort the whole run with 0 tables. Record it and go on.
+            const msg = err instanceof Error ? err.message : String(err);
+            errors.push(`drop existing tables: ${msg}`);
+            send({ type: 'error', table: '', message: `Drop existing tables failed: ${msg}` });
+            log(`Drop existing tables failed, continuing: ${msg}`);
+          }
         }
         log(`Creating ${stmts.tables.length} table(s)…`);
         // Create tables one at a time, each in its own transaction.
@@ -203,6 +230,29 @@ export async function POST(req: Request) {
               rowsCopied += n;
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
+              // A dropped connection to SQL Server (socket hang up,
+              // ECONNRESET, timeout) is usually transient — QYLA is on
+              // Wi-Fi — so retry the table once before giving up on it.
+              // A retry that also fails is recorded and the run moves
+              // on to the next table, as before.
+              if (/socket hang up|connection lost|ECONNRESET|ESOCKET|ETIMEDOUT|timed out|network/i.test(msg)) {
+                log(`Connection error copying ${table.schema}.${table.name} — retrying once: ${msg}`);
+                try {
+                  const pgTypes: Record<string, string> = {};
+                  for (const c of table.columns) {
+                    pgTypes[c.name] = overrides[`${c.schema}.${c.table}.${c.name}`] ?? 'text';
+                  }
+                  const n = await copyTableData(source, pool, table, pgTypes, (e) => send(e));
+                  rowsCopied += n;
+                  log(`Retry succeeded for ${table.schema}.${table.name}: ${n.toLocaleString()} rows.`);
+                  continue;
+                } catch (retryErr) {
+                  const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                  errors.push(`${table.schema}.${table.name}: ${retryMsg} (after 1 retry)`);
+                  send({ type: 'error', table: `${table.schema}.${table.name}`, message: retryMsg });
+                  continue;
+                }
+              }
               errors.push(`${table.schema}.${table.name}: ${msg}`);
               send({ type: 'error', table: `${table.schema}.${table.name}`, message: msg });
             }
@@ -306,7 +356,11 @@ export async function POST(req: Request) {
         await finishHistory('failed', 0, 0);
       } finally {
         await pool.end().catch(() => undefined);
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Stream already closed/errored — see the safe send() above.
+        }
       }
     },
   });
