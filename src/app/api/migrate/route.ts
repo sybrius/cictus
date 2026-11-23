@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import crypto from 'crypto';
 import { SqlServerConfigSchema, introspectSchema } from '@/lib/sqlserver';
+import { MysqlConfigSchema, introspectMysqlSchema } from '@/lib/mysql';
 import { TargetConfigSchema, createTargetPool, executeDdlInTransaction, targetRowCount } from '@/lib/postgres';
 import { schemaStatements } from '@/lib/ddl';
-import { copyTableData, fixIdentitySequences, type ProgressEvent } from '@/lib/migrate-data';
+import { copyTableData, fixIdentitySequences, type ProgressEvent, type SourceConnection } from '@/lib/migrate-data';
 import { recordRunStart, recordRunFinish } from '@/lib/history-db';
 import { resolveSource, resolveTarget } from '@/lib/resolve-connector';
 
@@ -56,17 +57,22 @@ export async function POST(req: Request) {
   const { overrides, includeData, dropExisting } = parsed.data;
   // Resolve saved connectors server-side (passwords never leave the
   // server) or fall back to the form values the wizard sent.
-  let resolvedSource: z.infer<typeof SqlServerConfigSchema>;
+  // The source type (sqlserver | mysql) comes from the connector or
+  // the form's sourceType field; the config is validated against the
+  // matching schema.
+  let resolvedSource: { kind: 'sqlserver' | 'mysql'; config: z.infer<typeof SqlServerConfigSchema> | z.infer<typeof MysqlConfigSchema> };
   let resolvedTarget: z.infer<typeof TargetConfigSchema>;
   let connectorTargetType: string | null = null;
   try {
     const s = resolveSource({ sourceConnectorId: parsed.data.sourceConnectorId, source: parsed.data.source });
     const t = resolveTarget({ targetConnectorId: parsed.data.targetConnectorId, target: parsed.data.target });
-    const sParsed = SqlServerConfigSchema.safeParse(s.config);
+    const sParsed = s.sourceType === 'mysql'
+      ? MysqlConfigSchema.safeParse(s.config)
+      : SqlServerConfigSchema.safeParse(s.config);
     const tParsed = TargetConfigSchema.safeParse({ connectionString: t.connectionString });
     if (!sParsed.success) throw new Error(sParsed.error.issues.map((i) => i.message).join('; '));
     if (!tParsed.success) throw new Error(tParsed.error.issues.map((i) => i.message).join('; '));
-    resolvedSource = sParsed.data;
+    resolvedSource = { kind: s.sourceType, config: sParsed.data };
     resolvedTarget = tParsed.data;
     connectorTargetType = t.connectorType;
     if (s.connectorName && !parsed.data.sourceName) parsed.data.sourceName = s.connectorName;
@@ -78,7 +84,10 @@ export async function POST(req: Request) {
       { status: 400, headers: { 'Content-Type': 'application/json' } },
     );
   }
-  const source = resolvedSource;
+  const source = resolvedSource.config;
+  const sourceConn: SourceConnection = resolvedSource.kind === 'mysql'
+    ? { kind: 'mysql', config: source as z.infer<typeof MysqlConfigSchema> }
+    : { kind: 'sqlserver', config: source as z.infer<typeof SqlServerConfigSchema> };
   const target = resolvedTarget;
 
   const stream = new ReadableStream({
@@ -131,10 +140,12 @@ export async function POST(req: Request) {
         } catch { /* history is best-effort */ }
       };
       try {
-        const full = await introspectSchema(source);
+        const full = resolvedSource.kind === 'mysql'
+          ? await introspectMysqlSchema(source as z.infer<typeof MysqlConfigSchema>)
+          : await introspectSchema(source as z.infer<typeof SqlServerConfigSchema>);
         const tables = full.tables.filter((t) => parsed.data.tables.includes(`${t.schema}.${t.name}`));
         const views = full.views.filter((v) => parsed.data.views.includes(`${v.schema}.${v.name}`));
-        const stmts = schemaStatements(tables, views, overrides);
+        const stmts = schemaStatements(tables, views, overrides, resolvedSource.kind, source.database);
         try {
           await recordRunStart({ id: runId, sourceName, targetName, targetType, tablesTotal: tables.length, viewsTotal: views.length });
           runRecorded = true;
@@ -226,7 +237,7 @@ export async function POST(req: Request) {
               for (const c of table.columns) {
                 pgTypes[c.name] = overrides[`${c.schema}.${c.table}.${c.name}`] ?? 'text';
               }
-              const n = await copyTableData(source, pool, table, pgTypes, (e) => send(e));
+              const n = await copyTableData(sourceConn, pool, table, pgTypes, (e) => send(e));
               rowsCopied += n;
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
@@ -242,7 +253,7 @@ export async function POST(req: Request) {
                   for (const c of table.columns) {
                     pgTypes[c.name] = overrides[`${c.schema}.${c.table}.${c.name}`] ?? 'text';
                   }
-                  const n = await copyTableData(source, pool, table, pgTypes, (e) => send(e));
+                  const n = await copyTableData(sourceConn, pool, table, pgTypes, (e) => send(e));
                   rowsCopied += n;
                   log(`Retry succeeded for ${table.schema}.${table.name}: ${n.toLocaleString()} rows.`);
                   continue;
