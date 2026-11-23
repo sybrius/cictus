@@ -16,7 +16,7 @@ export function Sidebar() {
     <aside className="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-slate-900 text-slate-200">
       <div className="px-5 pb-4 pt-6">
         <div className="text-lg font-bold text-white">Cictus</div>
-        <div className="mt-0.5 text-xs text-slate-400">SQL Server → Postgres Migrator</div>
+        <div className="mt-0.5 text-xs text-slate-400">SQL Server &amp; MySQL → Postgres Migrator</div>
         <div className="mt-3 inline-block rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-emerald-300">● Local · Enterprise</div>
       </div>
       <nav className="flex-1 space-y-1 px-3">
