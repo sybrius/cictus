@@ -3,9 +3,9 @@ import './globals.css';
 import { Sidebar } from '@/components/Sidebar';
 
 export const metadata: Metadata = {
-  title: 'Cictus — SQL Server → Postgres Migrator',
+  title: 'Cictus — SQL Server & MySQL → Postgres Migrator',
   description:
-    'Migrate SQL Server tables, schema, data and views to NHost, Supabase or any PostgreSQL database, with connectors and a local DuckDB migration history.',
+    'Migrate SQL Server or MySQL tables, schema, data and views to NHost, Supabase or any PostgreSQL database, with connectors and a local DuckDB migration history.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <div className="flex items-center justify-between">
                 <div className="text-sm font-medium text-slate-700">Migration workspace</div>
                 <div className="text-xs text-slate-500">
-                  Source: SQL Server · Targets: NHost / Supabase / PostgreSQL
+                  Sources: SQL Server / MySQL · Targets: NHost / Supabase / PostgreSQL
                 </div>
               </div>
             </header>
