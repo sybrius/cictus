@@ -2,7 +2,14 @@ import type { Pool } from 'pg';
 import type { ColumnInfo, TableInfo } from './sqlserver';
 import { streamTableRows } from './sqlserver';
 import type { SqlServerConfig } from './sqlserver';
+import { streamMysqlTableRows } from './mysql';
+import type { MysqlConfig } from './mysql';
 import { pgIdent, pgSchema } from './ddl';
+
+/** A migration source: SQL Server or MySQL, with its config. */
+export type SourceConnection =
+  | { kind: 'sqlserver'; config: SqlServerConfig }
+  | { kind: 'mysql'; config: MysqlConfig };
 
 export const BATCH_SIZE = 1000;
 
@@ -13,20 +20,31 @@ export type ProgressEvent =
   | { type: 'table-done'; table: string; copied: number }
   | { type: 'error'; table: string; message: string };
 
-/** Coerce one SQL Server value to something `pg` can send.
- *  - Buffer -> Buffer (bytea) unchanged
- *  - Date -> Date (timestamptz / timestamp) unchanged
+/** Coerce one source value to something `pg` can send.
+ *  - Buffer -> Buffer (bytea) unchanged; a 1-byte Buffer into a
+ *    boolean column (MySQL BIT(1)) becomes a boolean.
+ *  - Date -> Date (timestamptz / timestamp) unchanged; an invalid
+ *    Date (MySQL zero date) becomes NULL.
  *  - boolean-ish bit (0/1) -> boolean when the target column is boolean
  *  - uniqueidentifier string -> string (uuid) unchanged
+ *  - object into a json/jsonb column -> JSON string
  *  - everything else passes through; pg serialises numbers/strings. */
 export function coerceValue(value: unknown, pgType: string, sqlType: string): unknown {
   if (value === null || value === undefined) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (Buffer.isBuffer(value)) {
+    if (pgType === 'boolean' && value.length === 1) return value[0] !== 0;
+    return value;
+  }
   if (pgType === 'boolean' && typeof value === 'number') return value !== 0;
   if (pgType === 'boolean' && typeof value === 'string') {
     return value === '1' || value.toLowerCase() === 'true';
   }
   if (sqlType.toLowerCase() === 'uniqueidentifier' && typeof value === 'string') {
     return value.toLowerCase();
+  }
+  if ((pgType === 'jsonb' || pgType === 'json') && typeof value === 'object') {
+    return JSON.stringify(value);
   }
   return value;
 }
@@ -39,7 +57,7 @@ export function coerceValue(value: unknown, pgType: string, sqlType: string): un
  * rethrown so the caller can mark the table failed and continue.
  */
 export async function copyTableData(
-  source: SqlServerConfig,
+  source: SourceConnection,
   target: Pool,
   table: TableInfo,
   pgTypes: Record<string, string>,
@@ -54,7 +72,14 @@ export async function copyTableData(
   let copied = 0;
   onEvent({ type: 'table-start', table: `${table.schema}.${table.name}`, total: table.rowCount });
 
-  await streamTableRows(source, table.schema, table.name, BATCH_SIZE, async (rows) => {
+  const streamRows =
+    source.kind === 'mysql'
+      ? (batchSize: number, onBatch: (rows: Record<string, unknown>[]) => Promise<void>) =>
+          streamMysqlTableRows(source.config, table.schema, table.name, batchSize, onBatch)
+      : (batchSize: number, onBatch: (rows: Record<string, unknown>[]) => Promise<void>) =>
+          streamTableRows(source.config, table.schema, table.name, batchSize, onBatch);
+
+  await streamRows(BATCH_SIZE, async (rows) => {
     const values: unknown[] = [];
     const valueGroups: string[] = [];
     rows.forEach((row, r) => {
