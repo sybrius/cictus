@@ -2,6 +2,81 @@
 @tailwind components;
 @tailwind utilities;
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+  @apply bg-ink-50 font-sans text-slate-900 antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  @apply bg-brand-100 text-brand-900;
+}
+
+/* Slim, quiet scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd1e1 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-slate-300;
+}
+*::-webkit-scrollbar-thumb:hover {
+  @apply bg-slate-400;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Staggered entrance: add style={{ '--fade-delay': '60ms' }} alongside .animate-fade-up */
+.animate-fade-up {
+  animation-delay: var(--fade-delay, 0ms);
+}
+
+/* Skeleton shimmer bar */
+.skeleton {
+  background: linear-gradient(90deg, #eef0f7 25%, #f7f8fc 50%, #eef0f7 75%);
+  background-size: 800px 100%;
+  @apply animate-shimmer rounded-lg;
+}
+
+/* Sidebar collapse transition */
+.sidebar-shell {
+  transition: width 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sidebar-label {
+  transition: opacity 0.18s ease, transform 0.22s ease;
+  white-space: nowrap;
+}
+
+/* Accordion expand for history rows */
+.expand-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.expand-grid.open {
+  grid-template-rows: 1fr;
+}
+.expand-grid > div {
+  overflow: hidden;
+}
+
+/* Focus visibility for keyboard users */
+:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Number font for tabular data */
+.tnum {
+  font-variant-numeric: tabular-nums;
 }

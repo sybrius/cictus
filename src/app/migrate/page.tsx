@@ -2,12 +2,29 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  CheckCircle2,
+  Database,
+  Download,
+  Eye,
+  FileDown,
+  HardDrive,
+  Layers,
+  Play,
+  Rows3,
+  Table2,
+  XCircle,
+} from 'lucide-react';
 import type { DatabaseSchema } from '@/lib/sqlserver';
 import { SourceConnectionForm, TargetConnectionForm, type SourceFormValues, type TargetFormValues } from '@/components/ConnectionForm';
 import { SchemaTree } from '@/components/SchemaTree';
 import { TypeMappingTable } from '@/components/TypeMappingTable';
 import { MigrationLog, type LogLine } from '@/components/MigrationLog';
 import { ProgressBar } from '@/components/ProgressBar';
+import { Alert, Badge, Button, Card, CardHeader, PageHeader, inputCls } from '@/components/ui';
 
 const STEPS = ['Connect source', 'Connect target', 'Discover & Select', 'Type Mapping', 'Migrate', 'Validate & Report'];
 
@@ -19,6 +36,15 @@ const TARGET_HINTS: Record<string, string> = {
   supabase: 'After migration, tables appear in the Supabase Table Editor. Check Row Level Security policies before exposing them via the Supabase API — new tables have RLS disabled by default.',
   postgres: 'After migration, the tables are plain Postgres tables in the target database — no extra step.',
 };
+
+const STEP_DESCRIPTIONS = [
+  'Pick a saved source connector, or connect to SQL Server / MySQL manually.',
+  'Pick a saved target connector, or paste a Postgres connection string.',
+  'Discover the source schema and choose the tables and views to migrate.',
+  'Review the source → Postgres type map and edit any type inline.',
+  'Create tables, copy data, add foreign keys, create views.',
+  'Compare row counts and review any errors.',
+];
 
 export default function MigratePage() {
   const [step, setStep] = useState(0);
@@ -224,159 +250,278 @@ export default function MigratePage() {
     (step === 0 && sourceOk) || (step === 1 && targetOk) ||
     (step === 2 && selectedTables.size > 0) || step === 3;
 
-  const selectCls = 'w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm';
-
   return (
-    <div>
-      <h1 className="text-2xl font-bold">New migration</h1>
-      <p className="mt-1 text-sm text-slate-600">
-        Migrate tables, schema, data and views from SQL Server or MySQL to {targetTypeLabel} Postgres.
-        Pick saved connectors or connect manually. Nothing is executed until you start Step 5 — and you can download the SQL first.
-      </p>
+    <div className="space-y-6">
+      <PageHeader
+        title="New migration"
+        subtitle={`Migrate tables, schema, data and views from SQL Server or MySQL to ${targetTypeLabel} Postgres. Pick saved connectors or connect manually. Nothing is executed until you start Step 5 — and you can download the SQL first.`}
+      />
 
-      <ol className="mt-6 flex flex-wrap gap-2">
-        {STEPS.map((s, i) => (
-          <li key={s} className={`rounded-full px-3 py-1 text-xs font-medium ${i === step ? 'bg-blue-600 text-white' : i < step ? 'bg-green-100 text-green-800' : 'bg-slate-200 text-slate-600'}`}>
-            {i + 1}. {s}
-          </li>
-        ))}
-      </ol>
+      {/* Stepper */}
+      <Card className="animate-fade-up px-5 py-4 sm:px-6">
+        <ol className="flex flex-col gap-1 sm:flex-row sm:items-center">
+          {STEPS.map((s, i) => {
+            const done = i < step;
+            const current = i === step;
+            return (
+              <li key={s} className="flex flex-1 items-center gap-2.5 sm:gap-0">
+                <button
+                  onClick={() => { if (done) setStep(i); }}
+                  disabled={!done}
+                  className={`flex items-center gap-2.5 rounded-lg px-1 py-1 text-left ${done ? 'cursor-pointer' : 'cursor-default'}`}
+                >
+                  <span
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[13px] font-bold ring-2 transition-all ${
+                      done
+                        ? 'bg-emerald-500 text-white ring-emerald-500/30'
+                        : current
+                          ? 'bg-brand-600 text-white ring-brand-500/30 shadow-md shadow-brand-500/25'
+                          : 'bg-slate-100 text-slate-500 ring-slate-200'
+                    }`}
+                  >
+                    {done ? <Check className="h-4 w-4" /> : i + 1}
+                  </span>
+                  <span className={`text-[13px] font-medium leading-tight ${current ? 'text-slate-900' : done ? 'text-slate-600' : 'text-slate-400'}`}>
+                    {s}
+                  </span>
+                </button>
+                {i < STEPS.length - 1 && (
+                  <span className={`mx-2 hidden h-px flex-1 sm:block ${done ? 'bg-emerald-400' : 'bg-slate-200'}`} />
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </Card>
 
-      {error && <div className="mt-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>}
+      {error && <Alert>{error}</Alert>}
 
-      <section className="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-        {step === 0 && (
-          <><h2 className="mb-3 text-lg font-semibold">1 · Connect source (SQL Server or MySQL)</h2>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Saved source connector</label>
-          <select className={selectCls} value={sourceConnectorId} onChange={(e) => { setSourceConnectorId(e.target.value); setSourceOk(false); setSourceResult(null); }}>
-            <option value="">Manual connection (enter below)</option>
-            {sourceConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {c.host}/{c.database}</option>)}
-          </select>
-          <p className="mb-3 mt-1 text-xs text-slate-500">No source connector yet? <Link href="/connectors" className="text-blue-600">Add one in Connectors</Link> — its password stays on this machine and is never shown in the browser.</p>
-          {sourceConnectorId && selectedSourceConnector ? (
-            <div className="space-y-3">
-              <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                Using <strong>{selectedSourceConnector.name}</strong> — {selectedSourceConnector.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {selectedSourceConnector.host}/{selectedSourceConnector.database}
-                {selectedSourceConnector.lastTestOk === true && <span className="ml-2 text-green-700">last test ✓</span>}
+      <Card className="animate-fade-up">
+        <div style={{ '--fade-delay': '80ms' } as React.CSSProperties}>
+          <CardHeader title={`${step + 1} · ${STEPS[step]}`} subtitle={STEP_DESCRIPTIONS[step]} />
+          <div className="p-5 sm:p-6">
+            {step === 0 && (
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold tracking-wide text-slate-600">Saved source connector</label>
+                  <select className={inputCls} value={sourceConnectorId} onChange={(e) => { setSourceConnectorId(e.target.value); setSourceOk(false); setSourceResult(null); }}>
+                    <option value="">Manual connection (enter below)</option>
+                    {sourceConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {c.host}/{c.database}</option>)}
+                  </select>
+                  <p className="mt-1.5 text-xs text-slate-500">No source connector yet? <Link href="/connectors" className="font-medium text-brand-600 hover:text-brand-700">Add one in Connectors</Link> — its password stays on this machine and is never shown in the browser.</p>
+                </div>
+                {sourceConnectorId && selectedSourceConnector ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-ink-50 px-4 py-3">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-600">
+                        {selectedSourceConnector.type === 'mysql' ? <Database className="h-5 w-5" /> : <HardDrive className="h-5 w-5" />}
+                      </span>
+                      <div className="min-w-0 text-sm">
+                        <span className="block truncate font-semibold text-slate-900">{selectedSourceConnector.name}</span>
+                        <span className="text-slate-500">{selectedSourceConnector.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {selectedSourceConnector.host}/{selectedSourceConnector.database}</span>
+                      </div>
+                      {selectedSourceConnector.lastTestOk === true && <Badge tone="green" className="ml-auto shrink-0">Last test passed</Badge>}
+                    </div>
+                    <Button onClick={() => testSource()} loading={testing}>{testing ? 'Testing…' : 'Test connection'}</Button>
+                    {sourceResult && <p className={`text-sm font-medium ${sourceResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{sourceResult.message}</p>}
+                  </div>
+                ) : (
+                  <SourceConnectionForm initial={source} onTest={(v) => { setSource(v); testSource(v); }} onDiagnose={diagnoseSource} testing={testing} diagnosing={diagnosing} testResult={sourceResult} diagnoseResult={diagnoseResult} />
+                )}
               </div>
-              <button onClick={() => testSource()} disabled={testing} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{testing ? 'Testing…' : 'Test connection'}</button>
-              {sourceResult && <p className={`text-sm ${sourceResult.ok ? 'text-green-700' : 'text-red-700'}`}>{sourceResult.message}</p>}
-            </div>
-          ) : (
-            <SourceConnectionForm initial={source} onTest={(v) => { setSource(v); testSource(v); }} onDiagnose={diagnoseSource} testing={testing} diagnosing={diagnosing} testResult={sourceResult} diagnoseResult={diagnoseResult} />
-          )}</>
-        )}
-        {step === 1 && (
-          <><h2 className="mb-3 text-lg font-semibold">2 · Connect target ({targetTypeLabel})</h2>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Saved target connector</label>
-          <select className={selectCls} value={targetConnectorId} onChange={(e) => { setTargetConnectorId(e.target.value); setTargetOk(false); setTargetResult(null); }}>
-            <option value="">Manual connection (paste connection string below)</option>
-            {targetConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.type}{c.projectRef ? ` · ${c.projectRef}` : ''}{c.host ? ` · ${c.host}` : ''}</option>)}
-          </select>
-          <p className="mb-3 mt-1 text-xs text-slate-500">No target connector yet? <Link href="/connectors" className="text-blue-600">Add an NHost, Supabase or PostgreSQL connector</Link>.</p>
-          {targetConnectorId && selectedTargetConnector ? (
-            <div className="space-y-3">
-              <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                Using <strong>{selectedTargetConnector.name}</strong> — {selectedTargetConnector.type}
-                {selectedTargetConnector.projectRef ? ` · ${selectedTargetConnector.projectRef}` : ''}
-                {selectedTargetConnector.host ? ` · ${selectedTargetConnector.host}` : ''}
+            )}
+            {step === 1 && (
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold tracking-wide text-slate-600">Saved target connector</label>
+                  <select className={inputCls} value={targetConnectorId} onChange={(e) => { setTargetConnectorId(e.target.value); setTargetOk(false); setTargetResult(null); }}>
+                    <option value="">Manual connection (paste connection string below)</option>
+                    {targetConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.type}{c.projectRef ? ` · ${c.projectRef}` : ''}{c.host ? ` · ${c.host}` : ''}</option>)}
+                  </select>
+                  <p className="mt-1.5 text-xs text-slate-500">No target connector yet? <Link href="/connectors" className="font-medium text-brand-600 hover:text-brand-700">Add an NHost, Supabase or PostgreSQL connector</Link>.</p>
+                </div>
+                {targetConnectorId && selectedTargetConnector ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-ink-50 px-4 py-3">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-600">
+                        <Database className="h-5 w-5" />
+                      </span>
+                      <div className="min-w-0 text-sm">
+                        <span className="block truncate font-semibold text-slate-900">{selectedTargetConnector.name}</span>
+                        <span className="text-slate-500">
+                          {selectedTargetConnector.type}
+                          {selectedTargetConnector.projectRef ? ` · ${selectedTargetConnector.projectRef}` : ''}
+                          {selectedTargetConnector.host ? ` · ${selectedTargetConnector.host}` : ''}
+                        </span>
+                      </div>
+                    </div>
+                    <Button onClick={() => testTarget()} loading={testing}>{testing ? 'Testing…' : 'Test connection'}</Button>
+                    {targetResult && <p className={`text-sm font-medium ${targetResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{targetResult.message}</p>}
+                  </div>
+                ) : (
+                  <TargetConnectionForm initial={target} onTest={(v) => { setTarget(v); testTarget(v); }} testing={testing} testResult={targetResult} />
+                )}
+                <p className="rounded-xl bg-ink-50 px-4 py-3 text-xs leading-relaxed text-slate-500">{TARGET_HINTS[selectedTargetConnector?.type ?? 'postgres']}</p>
               </div>
-              <button onClick={() => testTarget()} disabled={testing} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{testing ? 'Testing…' : 'Test connection'}</button>
-              {targetResult && <p className={`text-sm ${targetResult.ok ? 'text-green-700' : 'text-red-700'}`}>{targetResult.message}</p>}
-            </div>
-          ) : (
-            <TargetConnectionForm initial={target} onTest={(v) => { setTarget(v); testTarget(v); }} testing={testing} testResult={targetResult} />
-          )}
-          <p className="mt-3 text-xs text-slate-500">{TARGET_HINTS[selectedTargetConnector?.type ?? 'postgres']}</p></>
-        )}
-        {step === 2 && (
-          <><h2 className="mb-3 text-lg font-semibold">3 · Discover &amp; select tables / views</h2>
-          {!schema ? (
-            <button onClick={discover} disabled={loadingSchema} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
-              {loadingSchema ? 'Discovering…' : 'Discover schema'}
-            </button>
-          ) : (
-            <SchemaTree
-              schema={schema}
-              selection={{ tables: selectedTables, views: selectedViews }}
-              onToggleTable={(k) => setSelectedTables((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; })}
-              onToggleView={(k) => setSelectedViews((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; })}
-              onToggleAll={(all) => {
-                setSelectedTables(all ? new Set(schema.tables.map((t) => `${t.schema}.${t.name}`)) : new Set());
-                setSelectedViews(all ? new Set(schema.views.map((v) => `${v.schema}.${v.name}`)) : new Set());
-              }}
-            />
-          )}</>
-        )}
-        {step === 3 && schema && (
-          <><h2 className="mb-3 text-lg font-semibold">4 · Type mapping (editable)</h2>
-          <p className="mb-3 text-sm text-slate-600">Defaults come from the {sourceTypeLabel} → Postgres map. Edit any Postgres type inline; warnings flag lossy conversions (geography needs PostGIS, sql_variant / hierarchyid / rowversion need review{effectiveSourceType === 'mysql' ? '; tinyint(1) is treated as boolean' : ''}).</p>
-          <TypeMappingTable schema={schema} selection={{ tables: selectedTables }} overrides={overrides} onOverride={(k, v) => setOverrides((o) => ({ ...o, [k]: v }))} sourceType={effectiveSourceType} />
-          <button onClick={downloadScript} className="mt-4 rounded border px-4 py-2 text-sm">Download generated SQL (.sql)</button>
-          {script && <p className="mt-2 text-xs text-green-700">SQL script generated ({script.length.toLocaleString()} chars) — download it again any time from Step 6.</p>}</>
-        )}
-        {step === 4 && (
-          <><h2 className="mb-3 text-lg font-semibold">5 · Migrate</h2>
-          <p className="mb-3 text-sm text-slate-600">Order: create tables → indexes → copy data in 1,000-row batches → add foreign keys → create views → validate row counts. The run is recorded in the local DuckDB history.</p>
-          <div className="mb-3 flex flex-wrap items-center gap-4 text-sm">
-            <label className="flex items-center gap-2"><input type="checkbox" checked={includeData} onChange={(e) => setIncludeData(e.target.checked)} /> Copy data</label>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={dropExisting} onChange={(e) => setDropExisting(e.target.checked)} /> Drop existing target tables first</label>
-            <span className="text-slate-600">{selectedTables.size} tables · {totalRows.toLocaleString()} rows · {selectedViews.size} views · target: {selectedTargetConnector?.name ?? targetTypeLabel}</span>
+            )}
+            {step === 2 && (
+              <div>
+                {!schema ? (
+                  <Button onClick={discover} loading={loadingSchema}>
+                    <Eye className="h-4 w-4" />
+                    {loadingSchema ? 'Discovering…' : 'Discover schema'}
+                  </Button>
+                ) : (
+                  <SchemaTree
+                    schema={schema}
+                    selection={{ tables: selectedTables, views: selectedViews }}
+                    onToggleTable={(k) => setSelectedTables((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; })}
+                    onToggleView={(k) => setSelectedViews((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; })}
+                    onToggleAll={(all) => {
+                      setSelectedTables(all ? new Set(schema.tables.map((t) => `${t.schema}.${t.name}`)) : new Set());
+                      setSelectedViews(all ? new Set(schema.views.map((v) => `${v.schema}.${v.name}`)) : new Set());
+                    }}
+                  />
+                )}
+              </div>
+            )}
+            {step === 3 && schema && (
+              <div>
+                <p className="mb-4 text-sm leading-relaxed text-slate-600">
+                  Defaults come from the {sourceTypeLabel} → Postgres map. Edit any Postgres type inline; warnings flag
+                  lossy conversions (geography needs PostGIS, sql_variant / hierarchyid / rowversion need review
+                  {effectiveSourceType === 'mysql' ? '; tinyint(1) is treated as boolean' : ''}).
+                </p>
+                <TypeMappingTable schema={schema} selection={{ tables: selectedTables }} overrides={overrides} onOverride={(k, v) => setOverrides((o) => ({ ...o, [k]: v }))} sourceType={effectiveSourceType} />
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <Button variant="secondary" onClick={downloadScript}>
+                    <FileDown className="h-4 w-4" />
+                    Download generated SQL (.sql)
+                  </Button>
+                  {script && <p className="flex items-center gap-1.5 text-xs font-medium text-emerald-700"><CheckCircle2 className="h-4 w-4" /> SQL script generated ({script.length.toLocaleString()} chars) — download it again any time from Step 6.</p>}
+                </div>
+              </div>
+            )}
+            {step === 4 && (
+              <div>
+                <p className="mb-4 text-sm leading-relaxed text-slate-600">
+                  Order: create tables → indexes → copy data in 1,000-row batches → add foreign keys → create views → validate row counts.
+                  The run is recorded in the local DuckDB history.
+                </p>
+                <div className="mb-5 flex flex-wrap items-center gap-x-6 gap-y-3 text-sm">
+                  <label className="flex cursor-pointer items-center gap-2 font-medium text-slate-700">
+                    <input type="checkbox" checked={includeData} onChange={(e) => setIncludeData(e.target.checked)} className="h-4 w-4 accent-brand-600" />
+                    Copy data
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2 font-medium text-slate-700">
+                    <input type="checkbox" checked={dropExisting} onChange={(e) => setDropExisting(e.target.checked)} className="h-4 w-4 accent-brand-600" />
+                    Drop existing target tables first
+                  </label>
+                  <span className="text-slate-500">
+                    <strong className="tnum font-semibold text-slate-900">{selectedTables.size}</strong> tables ·{' '}
+                    <strong className="tnum font-semibold text-slate-900">{totalRows.toLocaleString()}</strong> rows ·{' '}
+                    <strong className="tnum font-semibold text-slate-900">{selectedViews.size}</strong> views · target:{' '}
+                    {selectedTargetConnector?.name ?? targetTypeLabel}
+                  </span>
+                </div>
+                <ProgressBar value={overallPct} label={phase ? `Phase: ${phase} — ${copiedRows.toLocaleString()} / ${totalRows.toLocaleString()} rows` : 'Not started'} />
+                <div className="mt-5"><MigrationLog lines={log} /></div>
+                <Button variant="success" size="lg" onClick={runMigration} loading={migrating} className="mt-5">
+                  <Play className="h-4 w-4" />
+                  {migrating ? 'Migrating…' : 'Start migration'}
+                </Button>
+              </div>
+            )}
+            {step === 5 && (
+              <div>
+                {summary ? (
+                  <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {[
+                      { icon: <Table2 className="h-4 w-4" />, label: 'Tables', value: String(summary.tables) },
+                      { icon: <Rows3 className="h-4 w-4" />, label: 'Rows copied', value: summary.rowsCopied.toLocaleString() },
+                      { icon: <Eye className="h-4 w-4" />, label: 'Views', value: String(summary.views) },
+                      { icon: <XCircle className="h-4 w-4" />, label: 'Errors', value: String(summary.errors.length) },
+                    ].map((s) => (
+                      <div key={s.label} className="rounded-xl border border-slate-200 bg-ink-50 px-4 py-3.5">
+                        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">{s.icon}{s.label}</div>
+                        <div className="tnum mt-1 text-2xl font-bold tracking-tight text-slate-900">{s.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mb-4 text-sm text-slate-600">No migration has run yet in this session. Run Step 5 first, or download the SQL script from Step 4.</p>
+                )}
+                {validation.length > 0 && (
+                  <div className="mb-5 overflow-auto rounded-xl border border-slate-200">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                          <th className="px-4 py-2.5 font-semibold">Table</th>
+                          <th className="px-4 py-2.5 text-right font-semibold">Source rows</th>
+                          <th className="px-4 py-2.5 text-right font-semibold">Target rows</th>
+                          <th className="px-4 py-2.5 text-right font-semibold">Match</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {validation.map((v) => (
+                          <tr key={v.table} className="border-t border-slate-100 hover:bg-brand-50/30">
+                            <td className="px-4 py-2.5 font-mono text-[13px]">{v.table}</td>
+                            <td className="tnum px-4 py-2.5 text-right">{v.source.toLocaleString()}</td>
+                            <td className="tnum px-4 py-2.5 text-right">{v.target.toLocaleString()}</td>
+                            <td className="px-4 py-2.5 text-right">
+                              {v.match ? <Badge tone="green"><CheckCircle2 className="h-3.5 w-3.5" /> Match</Badge> : <Badge tone="red">Mismatch</Badge>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {summary && summary.errors.length > 0 && (
+                  <Alert tone="red">
+                    <strong>Errors:</strong>
+                    <ul className="mt-1 list-disc pl-5">{summary.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
+                  </Alert>
+                )}
+                <div className="mt-5 flex flex-wrap gap-2">
+                  <Button onClick={downloadScript}>
+                    <Download className="h-4 w-4" />
+                    Download SQL script (.sql)
+                  </Button>
+                  <Button variant="secondary" onClick={() => { setStep(0); setSummary(null); setValidation([]); setLog([]); }}>
+                    Start a new migration
+                  </Button>
+                  <Link href="/history">
+                    <Button variant="secondary">
+                      View in History <ArrowRight className="h-4 w-4" />
+                    </Button>
+                  </Link>
+                </div>
+                <div className="mt-5"><MigrationLog lines={log} /></div>
+              </div>
+            )}
           </div>
-          <ProgressBar value={overallPct} label={phase ? `Phase: ${phase} — ${copiedRows.toLocaleString()} / ${totalRows.toLocaleString()} rows` : 'Not started'} />
-          <div className="mt-4"><MigrationLog lines={log} /></div>
-          <button onClick={runMigration} disabled={migrating} className="mt-4 rounded bg-green-600 px-5 py-2 text-sm font-medium text-white disabled:opacity-50">
-            {migrating ? 'Migrating…' : 'Start migration'}
-          </button></>
-        )}
-        {step === 5 && (
-          <><h2 className="mb-3 text-lg font-semibold">6 · Validate &amp; report</h2>
-          {summary ? (
-            <div className="mb-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-              <div className="rounded border p-3"><div className="text-2xl font-bold">{summary.tables}</div><div className="text-slate-600">Tables</div></div>
-              <div className="rounded border p-3"><div className="text-2xl font-bold">{summary.rowsCopied.toLocaleString()}</div><div className="text-slate-600">Rows copied</div></div>
-              <div className="rounded border p-3"><div className="text-2xl font-bold">{summary.views}</div><div className="text-slate-600">Views</div></div>
-              <div className="rounded border p-3"><div className="text-2xl font-bold">{summary.errors.length}</div><div className="text-slate-600">Errors</div></div>
-            </div>
-          ) : <p className="text-sm text-slate-600">No migration has run yet in this session. Run Step 5 first, or download the SQL script from Step 4.</p>}
-          {validation.length > 0 && (
-            <table className="mb-4 w-full text-sm">
-              <thead><tr className="border-b text-left"><th className="py-2">Table</th><th className="text-right">Source rows</th><th className="text-right">Target rows</th><th className="text-right">Match</th></tr></thead>
-              <tbody>
-                {validation.map((v) => (
-                  <tr key={v.table} className="border-b">
-                    <td className="py-2 font-mono">{v.table}</td>
-                    <td className="text-right tabular-nums">{v.source.toLocaleString()}</td>
-                    <td className="text-right tabular-nums">{v.target.toLocaleString()}</td>
-                    <td className={`text-right font-medium ${v.match ? 'text-green-700' : 'text-red-700'}`}>{v.match ? '✓' : '✗ MISMATCH'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          {summary && summary.errors.length > 0 && (
-            <div className="mb-4 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">
-              <strong>Errors:</strong><ul className="list-disc pl-5">{summary.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
-            </div>
-          )}
-          <div className="flex flex-wrap gap-2">
-            <button onClick={downloadScript} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white">Download SQL script (.sql)</button>
-            <button onClick={() => { setStep(0); setSummary(null); setValidation([]); setLog([]); }} className="rounded border px-4 py-2 text-sm">Start a new migration</button>
-            <Link href="/history" className="rounded border px-4 py-2 text-sm">View in History →</Link>
-          </div>
-          <div className="mt-4"><MigrationLog lines={log} /></div></>
-        )}
-      </section>
+        </div>
+      </Card>
 
-      <div className="mt-4 flex justify-between">
-        <button onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0} className="rounded border bg-white px-4 py-2 text-sm disabled:opacity-50">← Back</button>
+      <div className="flex items-center justify-between gap-3">
+        <Button variant="secondary" onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0}>
+          <ArrowLeft className="h-4 w-4" />
+          Back
+        </Button>
         {step < 5 && (
-          <button onClick={() => { if (step === 1) discover(); setStep((s) => Math.min(5, s + 1)); }} disabled={!canNext} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
-            Continue →
-          </button>
+          <Button onClick={() => { if (step === 1) discover(); setStep((s) => Math.min(5, s + 1)); }} disabled={!canNext}>
+            Continue
+            <ArrowRight className="h-4 w-4" />
+          </Button>
         )}
       </div>
-      <p className="mt-6 text-xs text-slate-400">Credentials are only sent with the request that needs them. Saved connectors keep their password on this machine only (data/connectors.json, never committed). Review the generated SQL before running it against production; view conversion is best-effort {effectiveSourceType === 'mysql' ? 'MySQL' : 'T-SQL'} → Postgres.</p>
+      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-slate-400">
+        <Layers className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        Credentials are only sent with the request that needs them. Saved connectors keep their password on this machine only
+        (data/connectors.json, never committed). Review the generated SQL before running it against production; view
+        conversion is best-effort {effectiveSourceType === 'mysql' ? 'MySQL' : 'T-SQL'} → Postgres.
+      </p>
     </div>
   );
 }

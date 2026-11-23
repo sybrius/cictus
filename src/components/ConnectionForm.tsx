@@ -1,6 +1,8 @@
 'use client';
 
 import { useState } from 'react';
+import { Database, HardDrive, Loader2, Stethoscope } from 'lucide-react';
+import { Field, Toggle, inputCls } from '@/components/ui';
 
 export interface SourceFormValues {
   host: string;
@@ -19,6 +21,44 @@ export interface SourceFormValues {
 
 export interface TargetFormValues {
   connectionString: string;
+}
+
+function SourceTypeCard({
+  selected,
+  onClick,
+  icon,
+  title,
+  sub,
+}: {
+  selected: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  title: string;
+  sub: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={`flex flex-1 items-center gap-3 rounded-xl border-2 px-4 py-3 text-left transition-all duration-150 ${
+        selected
+          ? 'border-brand-500 bg-brand-50/60 shadow-sm'
+          : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+      }`}
+    >
+      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${selected ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+        {icon}
+      </span>
+      <span>
+        <span className={`block text-sm font-semibold ${selected ? 'text-brand-800' : 'text-slate-800'}`}>{title}</span>
+        <span className="mt-0.5 block text-xs text-slate-500">{sub}</span>
+      </span>
+      <span className={`ml-auto h-5 w-5 shrink-0 rounded-full border-2 ${selected ? 'border-brand-600 bg-brand-600' : 'border-slate-300 bg-white'} flex items-center justify-center`}>
+        {selected && <span className="h-2 w-2 rounded-full bg-white" />}
+      </span>
+    </button>
+  );
 }
 
 export function SourceConnectionForm({
@@ -41,62 +81,75 @@ export function SourceConnectionForm({
   const [v, setV] = useState(initial);
   const set = (k: keyof SourceFormValues) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setV({ ...v, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.type === 'number' ? Number(e.target.value) : e.target.value });
-  const input = 'w-full rounded border border-slate-300 px-3 py-2 text-sm';
-  const label = 'block text-xs font-medium text-slate-600 mb-1';
   const isMysql = v.sourceType === 'mysql';
   return (
-    <form onSubmit={(e) => { e.preventDefault(); onTest(v); }} className="space-y-3">
-      <div>
-        <label className={label}>Source database</label>
-        <select
-          className={input}
-          value={v.sourceType}
-          onChange={(e) => {
-            const t = e.target.value as 'sqlserver' | 'mysql';
-            setV({ ...v, sourceType: t, port: t === 'mysql' ? 3306 : 1433 });
-          }}
-        >
-          <option value="sqlserver">SQL Server</option>
-          <option value="mysql">MySQL</option>
-        </select>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div><label className={label}>Host</label><input className={input} value={v.host} onChange={set('host')} required placeholder="localhost" /></div>
-        <div><label className={label}>Port</label><input className={input} type="number" value={v.port} onChange={set('port')} required /></div>
-        <div><label className={label}>User</label><input className={input} value={v.user} onChange={set('user')} required /></div>
-        <div><label className={label}>Password</label><input className={input} type="password" value={v.password} onChange={set('password')} required /></div>
-        <div><label className={label}>Database</label><input className={input} value={v.database} onChange={set('database')} required /></div>
-        {!isMysql && <div><label className={label}>Instance (optional)</label><input className={input} value={v.instance} onChange={set('instance')} placeholder="SQLEXPRESS" /></div>}
+    <form onSubmit={(e) => { e.preventDefault(); onTest(v); }} className="space-y-4">
+      <Field label="Source database">
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <SourceTypeCard
+            selected={!isMysql}
+            onClick={() => setV({ ...v, sourceType: 'sqlserver', port: 1433 })}
+            icon={<HardDrive className="h-5 w-5" />}
+            title="SQL Server"
+            sub="T-SQL · port 1433"
+          />
+          <SourceTypeCard
+            selected={isMysql}
+            onClick={() => setV({ ...v, sourceType: 'mysql', port: 3306 })}
+            icon={<Database className="h-5 w-5" />}
+            title="MySQL"
+            sub="MySQL 5.7 / 8 · port 3306"
+          />
+        </div>
+      </Field>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="Host"><input className={inputCls} value={v.host} onChange={set('host')} required placeholder="localhost" /></Field>
+        <Field label="Port"><input className={inputCls} type="number" value={v.port} onChange={set('port')} required /></Field>
+        <Field label="User"><input className={inputCls} value={v.user} onChange={set('user')} required /></Field>
+        <Field label="Password"><input className={inputCls} type="password" value={v.password} onChange={set('password')} required /></Field>
+        <Field label="Database"><input className={inputCls} value={v.database} onChange={set('database')} required /></Field>
+        {!isMysql && <Field label="Instance (optional)"><input className={inputCls} value={v.instance} onChange={set('instance')} placeholder="SQLEXPRESS" /></Field>}
       </div>
       {!isMysql ? (
-        <>
-          <label className="flex items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" checked={v.trustCert} onChange={set('trustCert')} /> Trust server certificate (self-signed)
-          </label>
-          <label className="flex items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" checked={v.encrypt} onChange={set('encrypt')} /> Use encryption (TLS) — turn off for a local SQL Server if the test fails with “Could not connect (sequence)”
-          </label>
-        </>
+        <div className="space-y-2">
+          <Toggle
+            checked={v.trustCert}
+            onChange={(checked) => setV({ ...v, trustCert: checked })}
+            label="Trust server certificate"
+            hint="Needed for self-signed certificates on local SQL Server."
+          />
+          <Toggle
+            checked={v.encrypt}
+            onChange={(checked) => setV({ ...v, encrypt: checked })}
+            label="Use encryption (TLS)"
+            hint="Turn off for a local SQL Server if the test fails with “Could not connect (sequence)”."
+          />
+        </div>
       ) : (
-        <label className="flex items-center gap-2 text-sm text-slate-700">
-          <input type="checkbox" checked={v.ssl} onChange={set('ssl')} /> Use SSL/TLS — only if the MySQL server requires it (most local / Docker setups do not)
-        </label>
+        <Toggle
+          checked={v.ssl}
+          onChange={(checked) => setV({ ...v, ssl: checked })}
+          label="Use SSL/TLS"
+          hint="Only if the MySQL server requires it — most local / Docker setups do not."
+        />
       )}
       <div className="flex flex-wrap gap-2">
-        <button type="submit" disabled={testing} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+        <button type="submit" disabled={testing} className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-brand-700 active:scale-[0.98] disabled:opacity-50">
+          {testing && <Loader2 className="h-4 w-4 animate-spin" />}
           {testing ? 'Testing…' : 'Test connection'}
         </button>
-        <button type="button" disabled={diagnosing || testing} onClick={() => onDiagnose(v)} className="rounded border px-4 py-2 text-sm disabled:opacity-50">
+        <button type="button" disabled={diagnosing || testing} onClick={() => onDiagnose(v)} className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50">
+          <Stethoscope className="h-4 w-4" />
           {diagnosing ? 'Diagnosing…' : 'Diagnose (DNS + port)'}
         </button>
       </div>
       {diagnoseResult && (
-        <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 whitespace-pre-wrap">{diagnoseResult}</p>
+        <p className="whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs leading-relaxed text-slate-700">{diagnoseResult}</p>
       )}
       {testResult && (
-        <p className={`text-sm ${testResult.ok ? 'text-green-700' : 'text-red-700'}`}>{testResult.message}</p>
+        <p className={`text-sm font-medium ${testResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{testResult.message}</p>
       )}
-      <p className="text-xs text-slate-500">
+      <p className="text-xs leading-relaxed text-slate-500">
         Credentials are sent to the server only for this request and are never stored.
         {v.sourceType === 'sqlserver'
           ? ' If the host is a PC name like QYLA and the app runs on that same PC, try “localhost” instead — and for a named instance (QYLA\\SQLEXPRESS) put SQLEXPRESS in Instance and leave Port at 1433.'
@@ -119,24 +172,26 @@ export function TargetConnectionForm({
 }) {
   const [v, setV] = useState(initial);
   return (
-    <form onSubmit={(e) => { e.preventDefault(); onTest(v); }} className="space-y-3">
-      <div>
-        <label className="block text-xs font-medium text-slate-600 mb-1">NHost Postgres connection string</label>
+    <form onSubmit={(e) => { e.preventDefault(); onTest(v); }} className="space-y-4">
+      <Field
+        label="Postgres connection string"
+        hint="NHost Dashboard → your project → Database → Connection string. Use the direct (non-pooled) string for DDL."
+      >
         <input
-          className="w-full rounded border border-slate-300 px-3 py-2 font-mono text-sm"
+          className={`${inputCls} font-mono`}
           type="password"
           value={v.connectionString}
           onChange={(e) => setV({ connectionString: e.target.value })}
           required
           placeholder="postgres://postgres:…@db.<subdomain>.nhost.run:5432/postgres"
         />
-        <p className="mt-1 text-xs text-slate-500">NHost Dashboard → your project → Database → Connection string. Use the direct (non-pooled) string for DDL.</p>
-      </div>
-      <button type="submit" disabled={testing} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+      </Field>
+      <button type="submit" disabled={testing} className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-brand-700 active:scale-[0.98] disabled:opacity-50">
+        {testing && <Loader2 className="h-4 w-4 animate-spin" />}
         {testing ? 'Testing…' : 'Test connection'}
       </button>
       {testResult && (
-        <p className={`text-sm ${testResult.ok ? 'text-green-700' : 'text-red-700'}`}>{testResult.message}</p>
+        <p className={`text-sm font-medium ${testResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{testResult.message}</p>
       )}
     </form>
   );

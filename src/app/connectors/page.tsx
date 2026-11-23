@@ -1,6 +1,19 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import {
+  CheckCircle2,
+  Cloud,
+  Database,
+  HardDrive,
+  Pencil,
+  PlugZap,
+  Plus,
+  Server,
+  Trash2,
+  XCircle,
+} from 'lucide-react';
+import { Alert, Badge, Button, Card, CardHeader, EmptyState, Field, PageHeader, Toggle, inputCls } from '@/components/ui';
 
 type ConnectorType = 'nhost' | 'supabase' | 'postgres' | 'sqlserver' | 'mysql';
 
@@ -12,12 +25,28 @@ interface Connector {
   lastTestedAt: string | null; lastTestOk: boolean | null; lastTestMessage: string | null;
 }
 
-const TYPE_META: Record<ConnectorType, { label: string; hint: string }> = {
-  nhost: { label: 'NHost (Postgres)', hint: 'Enter the NHost subdomain and region, plus the postgres password — the connection string is built as postgres://postgres:…@<subdomain>.db.<region>.nhost.run:5432/postgres. Or paste the full connection string instead.' },
-  supabase: { label: 'Supabase (Postgres)', hint: 'Enter the project ref (from the Supabase dashboard URL / Project Settings) and the postgres password. Host defaults to db.<project-ref>.supabase.co:5432. Or paste the direct connection string instead (use the direct 5432 string, not the 6543 pooler, for DDL).' },
-  postgres: { label: 'PostgreSQL (generic)', hint: 'Any Postgres server: host, port (5432), database, user and password — or paste a full connection string.' },
-  sqlserver: { label: 'SQL Server', hint: 'Source database: host, port (1433), database, user and password. Named instance goes in Instance; leave Port at 1433 for a named instance.' },
-  mysql: { label: 'MySQL', hint: 'Source database: host, port (3306), database, user and password. Enable SSL only if the server requires it (most local / Docker setups do not).' },
+const TYPE_META: Record<ConnectorType, { label: string; hint: string; kind: 'source' | 'target' }> = {
+  nhost: { label: 'NHost (Postgres)', hint: 'Enter the NHost subdomain and region, plus the postgres password — the connection string is built as postgres://postgres:…@<subdomain>.db.<region>.nhost.run:5432/postgres. Or paste the full connection string instead.', kind: 'target' },
+  supabase: { label: 'Supabase (Postgres)', hint: 'Enter the project ref (from the Supabase dashboard URL / Project Settings) and the postgres password. Host defaults to db.<project-ref>.supabase.co:5432. Or paste the direct connection string instead (use the direct 5432 string, not the 6543 pooler, for DDL).', kind: 'target' },
+  postgres: { label: 'PostgreSQL (generic)', hint: 'Any Postgres server: host, port (5432), database, user and password — or paste a full connection string.', kind: 'target' },
+  sqlserver: { label: 'SQL Server', hint: 'Source database: host, port (1433), database, user and password. Named instance goes in Instance; leave Port at 1433 for a named instance.', kind: 'source' },
+  mysql: { label: 'MySQL', hint: 'Source database: host, port (3306), database, user and password. Enable SSL only if the server requires it (most local / Docker setups do not).', kind: 'source' },
+};
+
+const TYPE_ICON: Record<ConnectorType, typeof Database> = {
+  nhost: Cloud,
+  supabase: Server,
+  postgres: Database,
+  sqlserver: HardDrive,
+  mysql: Database,
+};
+
+const TYPE_TILE: Record<ConnectorType, string> = {
+  nhost: 'bg-violet-50 text-violet-600',
+  supabase: 'bg-emerald-50 text-emerald-600',
+  postgres: 'bg-sky-50 text-sky-600',
+  sqlserver: 'bg-blue-50 text-blue-600',
+  mysql: 'bg-orange-50 text-orange-600',
 };
 
 const EMPTY: Record<string, string | number | boolean> = {
@@ -53,6 +82,7 @@ export default function ConnectorsPage() {
     setEditingId(null);
     setShowForm(true);
     setMessage(null); setError(null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function startEdit(c: Connector) {
@@ -64,6 +94,7 @@ export default function ConnectorsPage() {
     setEditingId(c.id);
     setShowForm(true);
     setMessage(null); setError(null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function save() {
@@ -94,104 +125,158 @@ export default function ConnectorsPage() {
   }
 
   const type = form.type as ConnectorType;
-  const input = 'w-full rounded border border-slate-300 px-3 py-2 text-sm';
-  const label = 'block text-xs font-medium text-slate-600 mb-1';
+  const sources = list.filter((c) => c.kind === 'source');
+  const targets = list.filter((c) => c.kind === 'target');
 
   return (
-    <div>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">Connectors</h1>
-          <p className="mt-1 text-sm text-slate-600">
-            Named, reusable connections. Add a SQL Server or MySQL source once, and NHost, Supabase or PostgreSQL targets — then pick them in the migration wizard instead of re-typing credentials.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => (
-            <button key={t} onClick={() => startAdd(t)} className="rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white">+ {TYPE_META[t].label}</button>
-          ))}
-        </div>
-      </div>
-
-      {message && <div className="mt-4 rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-800">{message}</div>}
-      {error && <div className="mt-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>}
-
-      {showForm && (
-        <section className="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">{editingId ? 'Edit connector' : `Add ${TYPE_META[type].label}`}</h2>
-          <p className="mt-1 text-xs text-slate-500">{TYPE_META[type].hint}</p>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <div><label className={label}>Name</label><input className={input} value={String(form.name)} onChange={set('name')} placeholder="e.g. NHost production" required /></div>
-            <div><label className={label}>Type</label>
-              <select className={input} value={type} onChange={(e) => { const t = e.target.value as ConnectorType; setForm((f) => ({ ...f, type: t, port: t === 'sqlserver' ? 1433 : t === 'mysql' ? 3306 : 5432 })); }}>
-                {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => <option key={t} value={t}>{TYPE_META[t].label}</option>)}
-              </select>
-            </div>
-            {(type === 'nhost' || type === 'supabase') && (
-              <>
-                <div><label className={label}>{type === 'nhost' ? 'NHost subdomain' : 'Supabase project ref'}</label><input className={input} value={String(form.projectRef)} onChange={set('projectRef')} placeholder={type === 'nhost' ? 'my-app' : 'abcdefghijklmnop'} /></div>
-                {type === 'nhost' && <div><label className={label}>Region</label><input className={input} value={String(form.region)} onChange={set('region')} placeholder="eu-central-1" /></div>}
-              </>
-            )}
-            <div><label className={label}>Host {(type === 'sqlserver' || type === 'mysql') ? '' : '(optional if project ref / connection string is given)'}</label><input className={input} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'QYLA' : type === 'mysql' ? 'localhost' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} /></div>
-            <div><label className={label}>Port</label><input className={input} type="number" value={Number(form.port)} onChange={set('port')} /></div>
-            <div><label className={label}>Database</label><input className={input} value={String(form.database)} onChange={set('database')} /></div>
-            <div><label className={label}>User</label><input className={input} value={String(form.user)} onChange={set('user')} /></div>
-            <div><label className={label}>Password {editingId ? '(leave blank to keep the saved one)' : ''}</label><input className={input} type="password" value={String(form.password)} onChange={set('password')} autoComplete="new-password" /></div>
-            {type === 'sqlserver' && <div><label className={label}>Instance (optional)</label><input className={input} value={String(form.instance)} onChange={set('instance')} placeholder="SQLEXPRESS" /></div>}
-            {type !== 'sqlserver' && type !== 'mysql' && <div className="col-span-2"><label className={label}>Connection string (optional — overrides host/port/user above)</label><input className={input} type="password" value={String(form.connectionString)} onChange={set('connectionString')} placeholder="postgres://postgres:…@host:5432/postgres" autoComplete="new-password" /></div>}
-          </div>
-          {type === 'sqlserver' && (
-            <div className="mt-3 flex gap-4 text-sm">
-              <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.encrypt)} onChange={set('encrypt')} /> Encryption (TLS)</label>
-              <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.trustCert)} onChange={set('trustCert')} /> Trust server certificate</label>
-            </div>
-          )}
-          {type === 'mysql' && (
-            <div className="mt-3 flex gap-4 text-sm">
-              <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(form.ssl)} onChange={set('ssl')} /> Use SSL/TLS</label>
-            </div>
-          )}
-          <div className="mt-4 flex gap-2">
-            <button onClick={save} disabled={saving} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? 'Saving…' : editingId ? 'Save changes' : 'Save connector'}</button>
-            <button onClick={() => setShowForm(false)} className="rounded border px-4 py-2 text-sm">Cancel</button>
-          </div>
-          <p className="mt-3 text-xs text-slate-500">Stored only on this machine in <span className="font-mono">data/connectors.json</span> (git-ignored). Passwords are never shown back in the browser and are only used server-side when you test or run a migration with that connector.</p>
-        </section>
-      )}
-
-      <section className="mt-6">
-        {loading ? <p className="text-sm text-slate-500">Loading…</p> : list.length === 0 ? (
-          <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm text-slate-600 shadow-sm">
-            No connectors yet. Add one above — for example your NHost project (subdomain + region + postgres password) and your Supabase project (project ref + password). Supabase and NHost are both plain Postgres, so the same migration engine drives all three.
-          </div>
-        ) : (
-          <div className="grid gap-3 md:grid-cols-2">
-            {list.map((c) => (
-              <div key={c.id} className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="font-semibold">{c.name}</div>
-                    <div className="text-xs text-slate-500">{TYPE_META[c.type].label} · {c.kind === 'source' ? 'Source' : 'Target'}</div>
-                  </div>
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${c.lastTestOk === true ? 'bg-green-100 text-green-800' : c.lastTestOk === false ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-600'}`}>
-                    {c.lastTestOk === true ? '✓ Tested' : c.lastTestOk === false ? '✗ Test failed' : 'Not tested'}
-                  </span>
-                </div>
-                <div className="mt-2 font-mono text-xs text-slate-600">
-                  {c.projectRef ? `${c.projectRef} · ` : ''}{c.host ? `${c.host}:${c.port}` : ''}{c.database ? ` / ${c.database}` : ''}
-                </div>
-                {c.lastTestMessage && <div className="mt-1 text-xs text-slate-500">{c.lastTestMessage}</div>}
-                <div className="mt-3 flex gap-2">
-                  <button onClick={() => test(c.id)} disabled={testingId === c.id} className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{testingId === c.id ? 'Testing…' : 'Test'}</button>
-                  <button onClick={() => startEdit(c)} className="rounded border px-3 py-1.5 text-xs">Edit</button>
-                  <button onClick={() => remove(c.id, c.name)} className="rounded border border-red-200 px-3 py-1.5 text-xs text-red-700">Delete</button>
-                </div>
-              </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Connectors"
+        subtitle="Named, reusable connections. Add a SQL Server or MySQL source once, and NHost, Supabase or PostgreSQL targets — then pick them in the migration wizard instead of re-typing credentials."
+        actions={
+          <div className="flex flex-wrap gap-2">
+            {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => (
+              <Button key={t} size="sm" variant={t === 'nhost' || t === 'sqlserver' ? 'primary' : 'secondary'} onClick={() => startAdd(t)}>
+                <Plus className="h-3.5 w-3.5" />
+                {TYPE_META[t].label}
+              </Button>
             ))}
           </div>
-        )}
-      </section>
+        }
+      />
+
+      {message && <Alert tone="green">{message}</Alert>}
+      {error && <Alert>{error}</Alert>}
+
+      {showForm && (
+        <Card className="animate-scale-in">
+          <CardHeader title={editingId ? 'Edit connector' : `Add ${TYPE_META[type].label}`} subtitle={TYPE_META[type].hint} />
+          <div className="space-y-4 p-5 sm:p-6">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field label="Name"><input className={inputCls} value={String(form.name)} onChange={set('name')} placeholder="e.g. NHost production" required /></Field>
+              <Field label="Type">
+                <select className={inputCls} value={type} onChange={(e) => { const t = e.target.value as ConnectorType; setForm((f) => ({ ...f, type: t, port: t === 'sqlserver' ? 1433 : t === 'mysql' ? 3306 : 5432 })); }}>
+                  {(Object.keys(TYPE_META) as ConnectorType[]).map((t) => <option key={t} value={t}>{TYPE_META[t].label}</option>)}
+                </select>
+              </Field>
+              {(type === 'nhost' || type === 'supabase') && (
+                <>
+                  <Field label={type === 'nhost' ? 'NHost subdomain' : 'Supabase project ref'}>
+                    <input className={inputCls} value={String(form.projectRef)} onChange={set('projectRef')} placeholder={type === 'nhost' ? 'my-app' : 'abcdefghijklmnop'} />
+                  </Field>
+                  {type === 'nhost' && <Field label="Region"><input className={inputCls} value={String(form.region)} onChange={set('region')} placeholder="eu-central-1" /></Field>}
+                </>
+              )}
+              <Field label={`Host${(type === 'sqlserver' || type === 'mysql') ? '' : ' (optional if project ref / connection string is given)'}`}>
+                <input className={inputCls} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'QYLA' : type === 'mysql' ? 'localhost' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} />
+              </Field>
+              <Field label="Port"><input className={inputCls} type="number" value={Number(form.port)} onChange={set('port')} /></Field>
+              <Field label="Database"><input className={inputCls} value={String(form.database)} onChange={set('database')} /></Field>
+              <Field label="User"><input className={inputCls} value={String(form.user)} onChange={set('user')} /></Field>
+              <Field label={`Password${editingId ? ' (leave blank to keep the saved one)' : ''}`}>
+                <input className={inputCls} type="password" value={String(form.password)} onChange={set('password')} autoComplete="new-password" />
+              </Field>
+              {type === 'sqlserver' && <Field label="Instance (optional)"><input className={inputCls} value={String(form.instance)} onChange={set('instance')} placeholder="SQLEXPRESS" /></Field>}
+              {type !== 'sqlserver' && type !== 'mysql' && (
+                <div className="sm:col-span-2">
+                  <Field label="Connection string (optional — overrides host/port/user above)">
+                    <input className={inputCls} type="password" value={String(form.connectionString)} onChange={set('connectionString')} placeholder="postgres://postgres:…@host:5432/postgres" autoComplete="new-password" />
+                  </Field>
+                </div>
+              )}
+            </div>
+            {type === 'sqlserver' && (
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Toggle checked={Boolean(form.encrypt)} onChange={(checked) => setForm((f) => ({ ...f, encrypt: checked }))} label="Encryption (TLS)" />
+                <Toggle checked={Boolean(form.trustCert)} onChange={(checked) => setForm((f) => ({ ...f, trustCert: checked }))} label="Trust server certificate" />
+              </div>
+            )}
+            {type === 'mysql' && (
+              <Toggle checked={Boolean(form.ssl)} onChange={(checked) => setForm((f) => ({ ...f, ssl: checked }))} label="Use SSL/TLS" hint="Only if the MySQL server requires it." />
+            )}
+            <div className="flex gap-2">
+              <Button onClick={save} loading={saving}>{saving ? 'Saving…' : editingId ? 'Save changes' : 'Save connector'}</Button>
+              <Button variant="secondary" onClick={() => setShowForm(false)}>Cancel</Button>
+            </div>
+            <p className="text-xs leading-relaxed text-slate-500">
+              Stored only on this machine in <span className="font-mono">data/connectors.json</span> (git-ignored).
+              Passwords are never shown back in the browser and are only used server-side when you test or run a migration with that connector.
+            </p>
+          </div>
+        </Card>
+      )}
+
+      {loading ? (
+        <div className="grid gap-4 md:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="skeleton h-[132px]" />
+          ))}
+        </div>
+      ) : list.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={<PlugZap className="h-7 w-7" />}
+            title="No connectors yet"
+            body="Add one above — for example your NHost project (subdomain + region + postgres password) and your Supabase project (project ref + password). Supabase and NHost are both plain Postgres, so the same migration engine drives all three."
+          />
+        </Card>
+      ) : (
+        <div className="space-y-6">
+          {[
+            { label: 'Sources', items: sources, icon: Database },
+            { label: 'Targets', items: targets, icon: Server },
+          ].map(({ label, items, icon: SectionIcon }) => items.length > 0 && (
+            <section key={label} className="animate-fade-up">
+              <div className="mb-3 flex items-center gap-2">
+                <SectionIcon className="h-4 w-4 text-slate-400" />
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{label} <span className="tnum text-slate-400">· {items.length}</span></h2>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                {items.map((c) => {
+                  const Icon = TYPE_ICON[c.type];
+                  return (
+                    <Card key={c.id} hover className="p-5">
+                      <div className="flex items-start gap-3.5">
+                        <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${TYPE_TILE[c.type]}`}>
+                          <Icon className="h-5 w-5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="truncate font-semibold text-slate-900">{c.name}</div>
+                              <div className="text-xs text-slate-500">{TYPE_META[c.type].label} · {c.kind === 'source' ? 'Source' : 'Target'}</div>
+                            </div>
+                            {c.lastTestOk === true ? (
+                              <Badge tone="green"><CheckCircle2 className="h-3.5 w-3.5" /> Tested</Badge>
+                            ) : c.lastTestOk === false ? (
+                              <Badge tone="red"><XCircle className="h-3.5 w-3.5" /> Test failed</Badge>
+                            ) : (
+                              <Badge tone="slate">Not tested</Badge>
+                            )}
+                          </div>
+                          <div className="mt-2 truncate font-mono text-xs text-slate-500">
+                            {c.projectRef ? `${c.projectRef} · ` : ''}{c.host ? `${c.host}:${c.port}` : ''}{c.database ? ` / ${c.database}` : ''}
+                          </div>
+                          {c.lastTestMessage && <div className="mt-1 truncate text-xs text-slate-400">{c.lastTestMessage}</div>}
+                          <div className="mt-3.5 flex gap-2">
+                            <Button size="sm" onClick={() => test(c.id)} loading={testingId === c.id}>{testingId === c.id ? 'Testing…' : 'Test'}</Button>
+                            <Button size="sm" variant="secondary" onClick={() => startEdit(c)}>
+                              <Pencil className="h-3.5 w-3.5" /> Edit
+                            </Button>
+                            <Button size="sm" variant="danger" onClick={() => remove(c.id, c.name)}>
+                              <Trash2 className="h-3.5 w-3.5" /> Delete
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
