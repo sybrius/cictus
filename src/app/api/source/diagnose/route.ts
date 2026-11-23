@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { SqlServerConfigSchema, diagnoseSqlServer } from '@/lib/sqlserver';
+import { MysqlConfigSchema, diagnoseMysql } from '@/lib/mysql';
 import { resolveSource } from '@/lib/resolve-connector';
 
 // POST /api/source/diagnose — network-only check (DNS + TCP), no login.
@@ -7,7 +8,18 @@ import { resolveSource } from '@/lib/resolve-connector';
 export async function POST(req: Request) {
   const body = await req.json().catch(() => null);
   try {
-    const { config } = resolveSource((body ?? {}) as Record<string, unknown>);
+    const { config, sourceType } = resolveSource((body ?? {}) as Record<string, unknown>);
+    if (sourceType === 'mysql') {
+      const parsed = MysqlConfigSchema.safeParse(config);
+      if (!parsed.success) {
+        return NextResponse.json(
+          { ok: false, error: parsed.error.issues.map((i) => i.message).join('; ') },
+          { status: 400 },
+        );
+      }
+      const result = await diagnoseMysql(parsed.data);
+      return NextResponse.json({ ok: result.dns.ok && result.tcp.ok, ...result });
+    }
     const parsed = SqlServerConfigSchema.safeParse(config);
     if (!parsed.success) {
       return NextResponse.json(
