@@ -1,35 +1,70 @@
-# SQL Server → Postgres Migrator (Cictus)
+# Cictus — SQL Server & MySQL → Postgres Migrator
 
-A Next.js (App Router, TypeScript, Tailwind) enterprise-style web app that
-migrates SQL Server tables, schema, data and views to **NHost, Supabase, or
-any PostgreSQL** database — all three are plain Postgres under the hood, so
-the same engine drives them all.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)](https://www.typescriptlang.org/)
+[![Postgres](https://img.shields.io/badge/Postgres-16-blue.svg)](https://www.postgresql.org/)
 
-The app has four areas (sidebar navigation):
+**Cictus** is an open-source web app that migrates database tables, schema,
+data and views from **SQL Server** or **MySQL** to **PostgreSQL** — NHost,
+Supabase, or any plain Postgres server. It is built for teams moving an
+existing application database to Postgres without hand-writing the DDL:
+point it at a source, pick tables and views, review the type mapping, and
+migrate with live progress, per-table validation, and a full run history.
 
-- **Dashboard** (`/`) — totals across all recorded runs (runs, rows, tables,
-  success rate), recent migrations, and connector status.
-- **New migration** (`/migrate`) — the 6-step wizard:
-  1. **Connect SQL Server** — pick a saved source connector or connect manually.
-  2. **Connect target** — pick a saved NHost / Supabase / PostgreSQL connector
-     or paste a connection string manually.
-  3. **Discover & Select** — introspects `INFORMATION_SCHEMA` + `sys.views` /
-     `sys.sql_modules`; pick tables and views, with row counts and no-PK flags.
-  4. **Type Mapping** — editable SQL Server → Postgres type map with warnings
-     for lossy conversions.
-  5. **Migrate** — schema (tables → indexes) → data in 1,000-row batches →
-     foreign keys → views → live log + progress, streamed over SSE.
-  6. **Validate & Report** — source vs target row counts, error list, and a
-     downloadable `.sql` script of the generated DDL.
-- **Connectors** (`/connectors`) — save named, reusable connections: SQL Server
-  sources, and NHost / Supabase / PostgreSQL targets. A connector's password
-  is stored only on this machine (`data/connectors.json`, git-ignored) and is
-  never sent back to the browser — the wizard sends only the connector id and
-  the server resolves the credentials.
-- **History** (`/history`) — every migration run, with per-table validation and
-  errors, read from the local DuckDB store.
+- **Sources:** SQL Server, MySQL
+- **Targets:** NHost (Hasura), Supabase, generic PostgreSQL
+- **Stack:** Next.js 14 (App Router), TypeScript, Tailwind, `mssql`,
+  `mysql2`, `pg`, DuckDB for local run history
 
-## Targets: NHost vs Supabase vs plain Postgres
+## Features
+
+- **6-step migration wizard** — connect source → connect target →
+  discover & select → type mapping → migrate → validate & report.
+- **Schema discovery** — tables, columns, primary keys, foreign keys,
+  indexes, views and row counts, straight from the source's
+  `INFORMATION_SCHEMA`.
+- **Editable type mapping** — every column's Postgres type is shown with
+  warnings for lossy conversions, and can be overridden inline before
+  anything is created.
+- **Batched data copy** — 1,000 rows per batch, one transaction per batch,
+  `ON CONFLICT DO NOTHING` (re-runs are safe), with per-table progress
+  streamed over SSE. A failed table is reported and skipped; the run
+  continues with the next table.
+- **Foreign keys after data** — FKs are added once all rows are in place,
+  so copy order and orphaned rows in the source cannot lose data. A FK
+  that still fails is reported by constraint name, with the data already
+  copied.
+- **View conversion** — best-effort, rule-based conversion of T-SQL and
+  MySQL view definitions to Postgres, with notes on anything that needs
+  review (see [View conversion](#view-conversion)).
+- **Saved connectors** — named, reusable source and target connections.
+  Passwords are stored only on the machine running the app
+  (`data/connectors.json`, git-ignored) and are never sent back to the
+  browser; the wizard sends only the connector id and the server
+  resolves the credentials.
+- **Local DuckDB history** — every run is recorded in
+  `data/migrations.duckdb` (runs, per-table validation, errors) and shown
+  on the Dashboard and History pages. No server, no credentials — just
+  results.
+- **Downloadable SQL** — generate the full migration script as a `.sql`
+  file and review or run it yourself, without executing anything.
+
+## Supported sources & targets
+
+| | Details |
+|---|---|
+| **Sources** | SQL Server (2016+), MySQL 8 / MariaDB 10.5+ |
+| **Targets** | NHost Postgres, Supabase Postgres, any PostgreSQL 14+ |
+
+### Source notes
+
+| Source | Notes |
+|---|---|
+| SQL Server | `dbo` maps to Postgres `public`. Named instances resolve via the SQL Browser (UDP 1434). Identity columns become `GENERATED BY DEFAULT AS IDENTITY`. |
+| MySQL | The selected database maps to Postgres `public` (MySQL has no schemas). `tinyint(1)` maps to `boolean`; `int unsigned` maps to `bigint`; `bigint unsigned` maps to `numeric(20)`. `AUTO_INCREMENT` becomes identity. `DATETIME` (no timezone) maps to `timestamp`; `TIMESTAMP` maps to `timestamptz`. `ENUM`/`SET` map to `text` with a warning. Row counts are exact `COUNT(*)` — `information_schema.TABLE_ROWS` is only an InnoDB estimate and is not used. |
+
+### Target notes
 
 | Target | Connection | After migration |
 |---|---|---|
@@ -38,6 +73,121 @@ The app has four areas (sidebar navigation):
 | PostgreSQL | Any Postgres host/port/database/user/password | Nothing extra |
 
 Use the direct 5432 connection (not the 6543 pooler) for DDL and bulk loads.
+
+## Quick start
+
+```bash
+git clone https://github.com/sybrius/cictus.git
+cd cictus
+npm install
+cp .env.example .env.local   # fill in your own values; never commit .env.local
+npm run dev                  # http://localhost:3000
+```
+
+Production build:
+
+```bash
+npm run build
+npm start
+```
+
+Requirements: Node.js 20+ and npm. No database server is needed to run
+the app itself — it connects to your source and target databases over the
+network.
+
+## Usage
+
+1. **Connectors (optional)** — save a SQL Server or MySQL source and an
+   NHost / Supabase / PostgreSQL target once, then pick them in the
+   wizard instead of re-typing credentials.
+2. **New migration** — the wizard walks through source → target →
+   discover & select → type mapping → migrate → validate.
+3. **History** — every run, with per-table row counts and errors.
+4. **Dashboard** — totals across runs, recent migrations, connector status.
+
+### The wizard in detail
+
+1. **Connect source** — pick a saved SQL Server / MySQL connector or
+   connect manually. **Test connection** verifies the login;
+   **Diagnose (DNS + port)** tells you whether a failure is DNS, TCP,
+   or login/TLS, without logging in.
+2. **Connect target** — pick a saved NHost / Supabase / PostgreSQL
+   connector or paste a connection string manually.
+3. **Discover & Select** — introspects the source; pick tables and views,
+   with row counts and no-PK flags (tables without a primary key cannot
+   be tracked in Hasura until one is added).
+4. **Type Mapping** — editable source → Postgres type map with warnings
+   for lossy conversions.
+5. **Migrate** — schema (tables → indexes) → data in 1,000-row batches →
+   foreign keys → views → live log + progress, streamed over SSE.
+6. **Validate & Report** — source vs target row counts, error list, and a
+   downloadable `.sql` script of the generated DDL.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `SQLSERVER_HOST` / `SQLSERVER_PORT` / `SQLSERVER_USER` / `SQLSERVER_PASSWORD` / `SQLSERVER_DATABASE` | Source SQL Server. The wizard collects these in the UI; the env vars are only defaults/documentation. |
+| `SQLSERVER_TRUST_CERT` | `true` if the server uses a self-signed certificate. |
+| `SQLSERVER_ENCRYPT` | `true` by default; set `false` for a local server if the test fails with "Could not connect (sequence)". |
+| `SQLSERVER_INSTANCE` | Optional named instance (e.g. `SQLEXPRESS`). |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | Source MySQL. Port defaults to 3306. |
+| `MYSQL_SSL` | `true` only if the MySQL server requires TLS. |
+| `NHOST_POSTGRES_URL` | Full Postgres connection string from the NHost Dashboard → Database. Use the direct (non-pooled) string for DDL. |
+| `NHOST_SUBDOMAIN` / `NHOST_REGION` | Your NHost project identifiers (display / Hasura links). |
+| `NHOST_ADMIN_SECRET` | Hasura admin secret — server-side only, only if you later call the Hasura metadata API. Never expose it to the browser. |
+
+**Credentials are never hardcoded and never stored server-side beyond the
+request that uses them** (except saved connectors, which live only in the
+local, git-ignored `data/connectors.json`). Each API route opens its own
+pool and closes it afterwards.
+
+## How migration works
+
+- **Schema discovery** — SQL Server: `INFORMATION_SCHEMA` + `sys.*`,
+  row counts from `sys.partitions`. MySQL: `INFORMATION_SCHEMA`
+  (columns, key usage, referential constraints, statistics, views) with
+  exact `COUNT(*)` per table.
+- **Type mapping** (`src/lib/type-map.ts`) — SQL Server: `int` →
+  `integer`, `bigint` → `bigint`, `decimal(p,s)` → `numeric(p,s)`,
+  `nvarchar(max)` → `text`, `datetime2` → `timestamptz`, `bit` →
+  `boolean`, `uniqueidentifier` → `uuid`, `varbinary` → `bytea`,
+  `xml` → `xml`. MySQL: `tinyint(1)` → `boolean`,
+  `int unsigned` → `bigint`, `decimal(p,s)` → `numeric(p,s)`,
+  `varchar(n)` → `varchar(n)`, `datetime` → `timestamp`,
+  `timestamp` → `timestamptz`, `json` → `jsonb`, `enum`/`set` → `text`.
+  Lossy types carry warnings: `money` → `numeric(19,4)`,
+  `datetimeoffset` loses the original offset text, `sql_variant` /
+  `hierarchyid` / `rowversion` need manual review.
+- **DDL** (`src/lib/ddl.ts`) — `CREATE TABLE` with PK,
+  `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`, `CREATE INDEX`, and
+  `CREATE OR REPLACE VIEW`. Identity / `AUTO_INCREMENT` columns become
+  `GENERATED BY DEFAULT AS IDENTITY` and their sequences are re-seeded
+  past the max value after the data load.
+- **Data copy** (`src/lib/migrate-data.ts`) — 1,000 rows per batch, one
+  transaction per batch, `ON CONFLICT DO NOTHING`, explicit identity
+  values, `bit` 0/1 → boolean coercion, MySQL `BIT(1)` buffers →
+  boolean, invalid dates → `NULL`, objects → `jsonb`. A failed batch is
+  reported and the table is marked failed; other tables continue. A
+  dropped source connection retries the table once.
+- **Validation** — row count per table, source vs target, shown in Step 6
+  and recorded in the DuckDB history.
+
+### View conversion
+
+View conversion is best-effort and rule-based — review converted views
+before relying on them. Anything unrecognised is kept in a note, and a
+failed view logs its converted SQL so the exact problem can be diagnosed.
+
+| Source | Handled |
+|---|---|
+| T-SQL | `TOP n` → `LIMIT n`, `GETDATE()` / `SYSUTCDATETIME()` → `now()`, `ISNULL` → `COALESCE`, `CONVERT(type, expr, style)` → `CAST`, `DATEADD` → `+ INTERVAL`, `N'…'` → `'…'`, `[brackets]` → `"quotes"`, `dbo.` → `public.`, `WITH (NOLOCK)` and other table hints stripped, leading CTEs preserved. `+` string concatenation is flagged (`\|\|` in Postgres). |
+| MySQL | `` `backticks` `` → `"quotes"`, `` `db`.`table` `` → `"public"."table"`, `IFNULL` → `COALESCE`, `IF(a, b, c)` → `CASE WHEN`, `DATE_ADD` / `DATE_SUB` → `+/- INTERVAL`, `LOCATE(a, b)` → `STRPOS(b, a)`, `ISNULL(x)` → `(x IS NULL)`, `NOW()` → `now()`, `CURDATE()` → `CURRENT_DATE`, `UNIX_TIMESTAMP(x)` → `extract(epoch from x)`, `UUID()` → `gen_random_uuid()`. `CONCAT()` works as-is in Postgres. |
+
+Identifiers keep their exact case: Postgres folds unquoted names to
+lowercase, but the tables and columns are created quoted (`"CallLog"`,
+`"WorkerId"`), so view references are quoted with the exact
+table/column names from the introspected schema.
 
 ## Local DuckDB history
 
@@ -53,64 +203,10 @@ FROM migrations ORDER BY started_at DESC;
 The `data/` directory is git-ignored: the DuckDB file and
 `data/connectors.json` live only on the machine that runs the app.
 
-## Setup
-
-```bash
-npm install
-cp .env.example .env.local   # fill in your own values; never commit .env.local
-npm run dev                  # http://localhost:3000
-```
-
-Production build:
-
-```bash
-npm run build
-npm start
-```
-
-## Environment variables
-
-| Variable | Purpose |
-|---|---|
-| `SQLSERVER_HOST` / `SQLSERVER_PORT` / `SQLSERVER_USER` / `SQLSERVER_PASSWORD` / `SQLSERVER_DATABASE` | Source SQL Server. The wizard collects these in the UI; the env vars are only defaults/documentation. |
-| `SQLSERVER_TRUST_CERT` | `true` if the server uses a self-signed certificate. |
-| `SQLSERVER_INSTANCE` | Optional named instance (e.g. `SQLEXPRESS`). |
-| `NHOST_POSTGRES_URL` | Full Postgres connection string from the NHost Dashboard → Database. Use the direct (non-pooled) string for DDL. |
-| `NHOST_SUBDOMAIN` / `NHOST_REGION` | Your NHost project identifiers (display / Hasura links). |
-| `NHOST_ADMIN_SECRET` | Hasura admin secret — server-side only, only if you later call the Hasura metadata API. Never expose it to the browser. |
-
-**Credentials are never hardcoded and never stored server-side.** The wizard
-sends them with the single request that needs them; each API route opens its
-own pool and closes it afterwards.
-
-## How migration works
-
-- **Schema discovery** (`src/lib/sqlserver.ts`): columns, PKs, FKs, indexes
-  and view definitions from `INFORMATION_SCHEMA` and `sys.*`; row counts from
-  `sys.partitions`.
-- **Type mapping** (`src/lib/type-map.ts`): `int` → `integer`,
-  `bigint` → `bigint`, `decimal(p,s)` → `numeric(p,s)`,
-  `nvarchar(max)` → `text`, `datetime2` → `timestamptz`, `bit` → `boolean`,
-  `uniqueidentifier` → `uuid`, `varbinary` → `bytea`, `xml` → `xml`.
-  Lossy types carry warnings: `money` → `numeric(19,4)`,
-  `datetimeoffset` loses the original offset text, `sql_variant` /
-  `hierarchyid` / `rowversion` need manual review.
-- **DDL** (`src/lib/ddl.ts`): `CREATE TABLE` with PK, `ALTER TABLE … ADD
-  CONSTRAINT … FOREIGN KEY`, `CREATE INDEX`, and `CREATE OR REPLACE VIEW`.
-  `dbo` maps to Postgres `public`. Identity columns become
-  `GENERATED BY DEFAULT AS IDENTITY` and their sequences are re-seeded
-  past the max value after the data load.
-- **View conversion** (T-SQL → Postgres, best-effort, rule-based):
-  `TOP n` → `LIMIT n`, `GETDATE()` → `now()`, `ISNULL` → `COALESCE`,
-  `N'…'` → `'…'`, `[brackets]` → `"quotes"`, `dbo.` → `public.`.
-  `+` string concatenation is flagged for review (`||` in Postgres).
-  Anything exotic is kept in a comment/note — review converted views
-  before relying on them.
-- **Data copy** (`src/lib/migrate-data.ts`): 1,000 rows per batch, one
-  transaction per batch, `ON CONFLICT DO NOTHING`, explicit identity
-  values, `bit` 0/1 → boolean coercion. A failed batch is reported and
-  the table is marked failed; other tables continue.
-- **Validation**: row count per table, source vs target, shown in Step 6.
+One DuckDB file can only be opened by one instance at a time, so the
+instance is kept as a process-wide singleton (`globalThis`) — in Next.js
+dev mode each route gets its own copy of a module, and a module-level
+singleton was opened twice, which failed with a file-lock error.
 
 ## NHost notes
 
@@ -129,17 +225,14 @@ own pool and closes it afterwards.
 - **Hasura permissions:** after tracking, set table permissions in Hasura
   (or NHost Auth roles) — migration only creates the tables, it does not
   grant GraphQL access.
-- **Large databases:** data copy streams from SQL Server in batches, but
+- **Large databases:** data copy streams from the source in batches, but
   the SSE request stays open for the whole run. For very large tables,
   migrate in smaller selections (a few tables per run) or run the
   generated `.sql` + a bulk loader (`COPY`) instead.
-- **Foreign keys** are applied before the data load, so a data row that
-  violates a FK will fail its batch. If you hit that, migrate parent
-  tables first, or temporarily drop FKs and re-add them afterwards.
 
-## Troubleshooting — SQL Server connection
+## Troubleshooting
 
-### `Failed to connect to QYLA:1433 - Could not connect (sequence)`
+### SQL Server: `Failed to connect to QYLA:1433 - Could not connect (sequence)`
 
 This is a pre-login handshake failure: SQL Server never completed login.
 It is **not** a wrong-password error — the server is not answering on
@@ -177,55 +270,140 @@ Most common causes, in order, for a local server:
    You can also uncheck **Use encryption (TLS)** in Step 1 for a local
    server.
 
+### MySQL: access denied / cannot connect
+
+- `Access denied for user` (1045) — the server answered, so the network
+  is fine. Check the username/password, and that the MySQL user may
+  connect from this host: a user created as `'app'@'localhost'` cannot
+  log in from another machine — create it as `'app'@'%'` (or the app's
+  IP) with the needed grants.
+- `Unknown database` (1049) — the database name is wrong (it is
+  case-sensitive on Linux).
+- `Host … is not allowed to connect` (1130) — same host-privilege problem
+  as 1045; see above.
+- `Client does not support authentication protocol` — the user uses
+  `caching_sha2_password` over a non-TLS connection. Enable SSL for the
+  connector, or change the user to `mysql_native_password`.
+- Nothing listening on 3306 — check that `mysqld` is running, that
+  `bind-address` allows this host, and that the firewall allows 3306.
+
 ### Other errors
 
-- `Login failed` — the server answered, so the network is fine. Check
-  the username/password, that SQL Server authentication (mixed mode) is
-  enabled, and that the login can access the database.
+- `Login failed` (SQL Server) — the server answered, so the network is
+  fine. Check the username/password, that SQL Server authentication
+  (mixed mode) is enabled, and that the login can access the database.
 - `ENOTFOUND / getaddrinfo` — the host name does not resolve from where
-  the app runs; see (4) above.
+  the app runs; use `localhost` on the same machine, or the LAN IP /
+  `host.docker.internal` from Docker / WSL.
+- `IO Error: Cannot open file …\data\migrations.duckdb` — another
+  `node.exe` (a stale dev server) holds the DuckDB file. End the extra
+  `node.exe` in Task Manager and restart `npm run dev`.
+- A view fails with `syntax error at or near …` — the failed view's
+  converted SQL is printed in the dev-server log on the `View failed:`
+  line; check what construct was not converted and adjust the view or
+  the converter (`src/lib/ddl.ts`).
 
 ## API routes
 
 | Route | Purpose |
 |---|---|
-| `POST /api/source/test` | Test the SQL Server connection. |
-| `POST /api/source/diagnose` | DNS + TCP check for the SQL Server host/port, no login. |
+| `POST /api/source/test` | Test the source connection (SQL Server or MySQL). |
+| `POST /api/source/diagnose` | DNS + TCP check for the source host/port, no login. |
 | `POST /api/source/schema` | Introspect tables, columns, PKs, FKs, indexes, views, row counts. |
-| `POST /api/target/test` | Test the NHost Postgres connection (+ PostGIS check). |
+| `POST /api/target/test` | Test the Postgres connection (+ PostGIS check). |
 | `POST /api/migrate` | Run the migration; streams progress as SSE (`text/event-stream`). |
 | `POST /api/migrate/ddl` | Return the generated SQL script (no execution). |
+| `GET /api/connectors` · `POST /api/connectors` · `DELETE /api/connectors` | Saved connectors (passwords never leave the server). |
+| `POST /api/connectors/test` | Test a saved connector. |
+| `GET /api/history` · `GET /api/history/[id]` | Migration run history from the local DuckDB store. |
 
 ## Project layout
 
 ```
 src/
   app/
-    page.tsx            6-step wizard
+    page.tsx                    Dashboard
+    migrate/page.tsx            6-step wizard
+    connectors/page.tsx         Saved connectors
+    history/page.tsx            Run history
     layout.tsx / globals.css
-    api/source/test|schema/route.ts
+    api/source/test|schema|diagnose/route.ts
     api/target/test/route.ts
     api/migrate/route.ts        SSE streaming migration
     api/migrate/ddl/route.ts    SQL script download
+    api/connectors/route.ts     Connector CRUD
+    api/connectors/test/route.ts
+    api/history/route.ts        Run list + stats
+    api/history/[id]/route.ts   Run detail
   components/
     ConnectionForm.tsx  SourceConnectionForm / TargetConnectionForm
     SchemaTree.tsx      Table/view picker with row counts
     TypeMappingTable.tsx Editable type map
     MigrationLog.tsx    Auto-scrolling log
     ProgressBar.tsx
+    Sidebar.tsx
   lib/
-    type-map.ts         SQL Server → Postgres mapping + warnings
+    type-map.ts         SQL Server / MySQL → Postgres mapping + warnings
     sqlserver.ts        mssql pool, introspection, batched row streaming
+    mysql.ts            mysql2 pool, introspection, batched row streaming
     postgres.ts         pg Pool, connection test, transactional DDL
-    ddl.ts              DDL generation + T-SQL → Postgres view conversion
+    ddl.ts              DDL generation + view conversion (T-SQL / MySQL)
     migrate-data.ts     Batched copy, coercion, identity-sequence fix
+    connectors.ts       Saved connectors (local JSON store)
+    resolve-connector.ts Resolve connector id / form payload + source type
+    history-db.ts       DuckDB run history (globalThis singleton)
 ```
+
+## Contributing
+
+Contributions are welcome — bug reports, new source/target support, and
+view-converter improvements especially.
+
+```bash
+npm install
+npm run typecheck   # tsc --noEmit
+npm run build       # production build
+npm run dev         # dev server on http://localhost:3000
+```
+
+Guidelines:
+
+- **Keep the source abstraction intact.** New sources go in their own
+  `src/lib/<source>.ts` (config schema, test, diagnose, introspect,
+  streaming) and map onto the shared `TableInfo` / `ColumnInfo` /
+  `ViewInfo` shapes; the DDL generator, data copy and validation should
+  not need source-specific branches beyond the type map and the view
+  dialect.
+- **Do not invent mappings.** A type or function with no Postgres
+  equivalent gets a warning and `needsReview`, not a silent guess.
+- **Verify before claiming.** Run `npm run typecheck` and
+  `npm run build` before opening a PR; if you touched the view
+  converter, add a unit case for the construct you changed.
+- **No credentials in code, issues, or PRs.** Use `.env.local` and the
+  local `data/` store; never paste connection strings or passwords.
+
+Please open an issue first for larger changes (a new source database, a
+new target, a change to the migration order) so the design can be agreed
+before the code is written.
+
+## Roadmap
+
+- [ ] PostgreSQL → PostgreSQL migrations (same engine, different source)
+- [ ] Oracle / SQLite sources
+- [ ] Scheduled / recurring migrations
+- [ ] `COPY`-based bulk load for very large tables
+- [ ] Hasura metadata API integration (auto-track tables after migration)
 
 ## Security
 
-- No credentials in code, no credentials stored, no credentials logged.
+- No credentials in code, no credentials stored (except saved connectors,
+  local only), no credentials logged.
 - All API inputs are validated with `zod`; table identifiers are
   allow-list validated before being interpolated into SQL.
 - Run this app on localhost or behind your own auth — it holds database
   credentials in memory for the duration of a request, so do not expose
   it publicly without adding authentication.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
