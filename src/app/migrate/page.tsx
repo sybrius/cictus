@@ -9,7 +9,7 @@ import { TypeMappingTable } from '@/components/TypeMappingTable';
 import { MigrationLog, type LogLine } from '@/components/MigrationLog';
 import { ProgressBar } from '@/components/ProgressBar';
 
-const STEPS = ['Connect SQL Server', 'Connect target', 'Discover & Select', 'Type Mapping', 'Migrate', 'Validate & Report'];
+const STEPS = ['Connect source', 'Connect target', 'Discover & Select', 'Type Mapping', 'Migrate', 'Validate & Report'];
 
 interface ValidationRow { table: string; source: number; target: number; match: boolean }
 interface ConnectorSummary { id: string; name: string; type: string; kind: string; host: string; database: string; projectRef: string; region: string; lastTestOk: boolean | null }
@@ -23,7 +23,7 @@ const TARGET_HINTS: Record<string, string> = {
 export default function MigratePage() {
   const [step, setStep] = useState(0);
   const [source, setSource] = useState<SourceFormValues>({
-    host: 'localhost', port: 1433, user: 'sa', password: '', database: '', trustCert: true, encrypt: true, instance: '',
+    host: 'localhost', port: 1433, user: 'sa', password: '', database: '', trustCert: true, encrypt: true, instance: '', ssl: false, sourceType: 'sqlserver',
   });
   const [target, setTarget] = useState<TargetFormValues>({ connectionString: '' });
   const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
@@ -62,6 +62,12 @@ export default function MigratePage() {
   const targetConnectors = connectors.filter((c) => c.kind === 'target');
   const selectedSourceConnector = connectors.find((c) => c.id === sourceConnectorId);
   const selectedTargetConnector = connectors.find((c) => c.id === targetConnectorId);
+  /** The source dialect for this run: from the picked connector, or
+   *  from the manual form's source-type selector. */
+  const effectiveSourceType: 'sqlserver' | 'mysql' = selectedSourceConnector
+    ? (selectedSourceConnector.type === 'mysql' ? 'mysql' : 'sqlserver')
+    : source.sourceType;
+  const sourceTypeLabel = effectiveSourceType === 'mysql' ? 'MySQL' : 'SQL Server';
   const targetTypeLabel = selectedTargetConnector
     ? selectedTargetConnector.type === 'nhost' ? 'NHost' : selectedTargetConnector.type === 'supabase' ? 'Supabase' : 'PostgreSQL'
     : 'Postgres';
@@ -224,7 +230,7 @@ export default function MigratePage() {
     <div>
       <h1 className="text-2xl font-bold">New migration</h1>
       <p className="mt-1 text-sm text-slate-600">
-        Migrate tables, schema, data and views from SQL Server to {targetTypeLabel} Postgres.
+        Migrate tables, schema, data and views from SQL Server or MySQL to {targetTypeLabel} Postgres.
         Pick saved connectors or connect manually. Nothing is executed until you start Step 5 — and you can download the SQL first.
       </p>
 
@@ -240,17 +246,17 @@ export default function MigratePage() {
 
       <section className="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
         {step === 0 && (
-          <><h2 className="mb-3 text-lg font-semibold">1 · Connect SQL Server (source)</h2>
+          <><h2 className="mb-3 text-lg font-semibold">1 · Connect source (SQL Server or MySQL)</h2>
           <label className="mb-1 block text-xs font-medium text-slate-600">Saved source connector</label>
           <select className={selectCls} value={sourceConnectorId} onChange={(e) => { setSourceConnectorId(e.target.value); setSourceOk(false); setSourceResult(null); }}>
             <option value="">Manual connection (enter below)</option>
-            {sourceConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.host}/{c.database}</option>)}
+            {sourceConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {c.host}/{c.database}</option>)}
           </select>
           <p className="mb-3 mt-1 text-xs text-slate-500">No source connector yet? <Link href="/connectors" className="text-blue-600">Add one in Connectors</Link> — its password stays on this machine and is never shown in the browser.</p>
           {sourceConnectorId && selectedSourceConnector ? (
             <div className="space-y-3">
               <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                Using <strong>{selectedSourceConnector.name}</strong> — {selectedSourceConnector.host}/{selectedSourceConnector.database}
+                Using <strong>{selectedSourceConnector.name}</strong> — {selectedSourceConnector.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {selectedSourceConnector.host}/{selectedSourceConnector.database}
                 {selectedSourceConnector.lastTestOk === true && <span className="ml-2 text-green-700">last test ✓</span>}
               </div>
               <button onClick={() => testSource()} disabled={testing} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{testing ? 'Testing…' : 'Test connection'}</button>
@@ -304,8 +310,8 @@ export default function MigratePage() {
         )}
         {step === 3 && schema && (
           <><h2 className="mb-3 text-lg font-semibold">4 · Type mapping (editable)</h2>
-          <p className="mb-3 text-sm text-slate-600">Defaults come from the SQL Server → Postgres map. Edit any Postgres type inline; warnings flag lossy conversions (geography needs PostGIS, sql_variant / hierarchyid / rowversion need review).</p>
-          <TypeMappingTable schema={schema} selection={{ tables: selectedTables }} overrides={overrides} onOverride={(k, v) => setOverrides((o) => ({ ...o, [k]: v }))} />
+          <p className="mb-3 text-sm text-slate-600">Defaults come from the {sourceTypeLabel} → Postgres map. Edit any Postgres type inline; warnings flag lossy conversions (geography needs PostGIS, sql_variant / hierarchyid / rowversion need review{effectiveSourceType === 'mysql' ? '; tinyint(1) is treated as boolean' : ''}).</p>
+          <TypeMappingTable schema={schema} selection={{ tables: selectedTables }} overrides={overrides} onOverride={(k, v) => setOverrides((o) => ({ ...o, [k]: v }))} sourceType={effectiveSourceType} />
           <button onClick={downloadScript} className="mt-4 rounded border px-4 py-2 text-sm">Download generated SQL (.sql)</button>
           {script && <p className="mt-2 text-xs text-green-700">SQL script generated ({script.length.toLocaleString()} chars) — download it again any time from Step 6.</p>}</>
         )}
@@ -370,7 +376,7 @@ export default function MigratePage() {
           </button>
         )}
       </div>
-      <p className="mt-6 text-xs text-slate-400">Credentials are only sent with the request that needs them. Saved connectors keep their password on this machine only (data/connectors.json, never committed). Review the generated SQL before running it against production; view conversion is best-effort T-SQL → Postgres.</p>
+      <p className="mt-6 text-xs text-slate-400">Credentials are only sent with the request that needs them. Saved connectors keep their password on this machine only (data/connectors.json, never committed). Review the generated SQL before running it against production; view conversion is best-effort {effectiveSourceType === 'mysql' ? 'MySQL' : 'T-SQL'} → Postgres.</p>
     </div>
   );
 }
