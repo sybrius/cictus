@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { SqlServerConfigSchema, introspectSchema } from '@/lib/sqlserver';
+import { MysqlConfigSchema, introspectMysqlSchema } from '@/lib/mysql';
 import { generateMigrationScript } from '@/lib/ddl';
 import { resolveSource } from '@/lib/resolve-connector';
 
@@ -30,21 +31,38 @@ export async function POST(req: Request) {
     );
   }
   try {
-    const { config } = resolveSource({
+    const { config, sourceType } = resolveSource({
       sourceConnectorId: parsed.data.sourceConnectorId,
       source: parsed.data.source,
     });
-    const sourceParsed = SqlServerConfigSchema.safeParse(config);
-    if (!sourceParsed.success) {
+    // Parse against the matching source schema (the union cannot be
+    // narrowed from the ternary, so each branch validates and runs
+    // on its own).
+    if (sourceType === 'mysql') {
+      const p = MysqlConfigSchema.safeParse(config);
+      if (!p.success) {
+        return NextResponse.json(
+          { ok: false, error: p.error.issues.map((i) => i.message).join('; ') },
+          { status: 400 },
+        );
+      }
+      const full = await introspectMysqlSchema(p.data);
+      const tables = full.tables.filter((t) => parsed.data.tables.includes(`${t.schema}.${t.name}`));
+      const views = full.views.filter((v) => parsed.data.views.includes(`${v.schema}.${v.name}`));
+      const { script, viewNotes } = generateMigrationScript(tables, views, parsed.data.overrides, 'mysql', p.data.database);
+      return NextResponse.json({ ok: true, script, viewNotes });
+    }
+    const p = SqlServerConfigSchema.safeParse(config);
+    if (!p.success) {
       return NextResponse.json(
-        { ok: false, error: sourceParsed.error.issues.map((i) => i.message).join('; ') },
+        { ok: false, error: p.error.issues.map((i) => i.message).join('; ') },
         { status: 400 },
       );
     }
-    const full = await introspectSchema(sourceParsed.data);
+    const full = await introspectSchema(p.data);
     const tables = full.tables.filter((t) => parsed.data.tables.includes(`${t.schema}.${t.name}`));
     const views = full.views.filter((v) => parsed.data.views.includes(`${v.schema}.${v.name}`));
-    const { script, viewNotes } = generateMigrationScript(tables, views, parsed.data.overrides);
+    const { script, viewNotes } = generateMigrationScript(tables, views, parsed.data.overrides, 'sqlserver', p.data.database);
     return NextResponse.json({ ok: true, script, viewNotes });
   } catch (err) {
     return NextResponse.json(
