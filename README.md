@@ -344,6 +344,77 @@ Notes:
   roles) — migration only creates the tables, it does not grant
   GraphQL access.
 
+## Limitations
+
+What the tool does not do, so you can plan around it:
+
+- **Tables, views and data only.** Stored procedures, functions,
+  triggers, standalone sequences, users / roles / permissions, SQL
+  Server Agent jobs and SSIS packages are not migrated. Only tables
+  (schema + data) and views move.
+- **View conversion is best-effort, not a compiler.** Views are
+  converted with rule-based rewrites per dialect (see
+  [View conversion](#view-conversion)). Anything unrecognised is kept
+  in a note, and a view that still fails is reported with its
+  converted SQL in the log so the exact problem can be diagnosed —
+  but complex constructs (CTEs with column lists, derived tables,
+  dialect-specific functions) may need a manual rewrite.
+- **No incremental or change-data-capture migrations.** Every run
+  copies the full selected tables. Re-runs are safe (`ON CONFLICT DO
+  NOTHING`), but they are not incremental — a scheduled run re-copies
+  everything each time. There is no row filtering, column renaming
+  or value transformation; the only per-column control is the type
+  override in Step 4.
+- **Foreign keys need clean data.** FKs are added after the data copy,
+  so copy order cannot lose rows — but if the source has orphaned
+  rows (a foreign key pointing at a parent row that does not exist),
+  that FK fails and is reported by constraint name while the data
+  stays copied. Clean the orphans in the source, or drop the FK in
+  the target.
+- **Some type mappings are lossy.** `ENUM` / `SET` become `text`
+  (values are not enforced), `money`, `sql_variant`,
+  `hierarchyid` and `rowversion` need manual review, Oracle
+  `ROWID` / `BFILE` / `SDO_GEOMETRY` are not carried over, and
+  `geography` / `geometry` columns need PostGIS enabled on the
+  target before the migration or those columns fail. The wizard
+  flags every lossy mapping in Step 4 — review it before running.
+- **One source → one target per run.** A run migrates one source
+  database into one target. There is no fan-out to several targets
+  and no merging of several sources in a single run.
+- **Hasura tracking has prerequisites.** Auto-track only works for
+  NHost or plain-Postgres targets with a Hasura admin secret saved
+  on the connector, and only for tables created in that run.
+  Tables without a primary key (or a unique constraint) cannot be
+  tracked at all — add one first. Supabase targets have no Hasura,
+  so the option is not offered for them.
+- **Schedules only run while the server runs.** This is a local tool:
+  the scheduler ticks while `npm run dev` (or the production
+  server) is up. A run that comes due while the server is off fires
+  once when it starts again — nothing fires while the machine is off.
+- **Long runs hold one request open.** The migration streams
+  progress over SSE for the whole run. For very large databases,
+  migrate in smaller selections (a few tables per run) or run the
+  generated `.sql` plus a bulk loader instead.
+- **COPY bulk load is selective.** Only tables with 5,000+ rows use
+  the COPY path, and tables with `geography` / `geometry` columns
+  stay on the batched INSERT path. A COPY failure falls back to
+  INSERT automatically.
+- **Source-specific scope.** Oracle migrates only the tables owned by
+  the connecting user. SQLite migrates a file that must sit on the
+  machine running the app, opened read-only. SQL Server named
+  instances resolve via the SQL Browser (UDP 1434), and TCP/IP must
+  be enabled on the server. MySQL row counts are exact `COUNT(*)`,
+  which is slow on very large tables.
+- **One history file, one process.** The DuckDB history file
+  (`data/migrations.duckdb`) can only be opened by one process at a
+  time — a second dev server pointed at the same folder fails with a
+  file-lock error. Stop the other server (or `node.exe`) first.
+- **No authentication of its own.** The app holds database
+  credentials in memory for the duration of a request and stores
+  saved connectors on disk, so run it on localhost or behind your
+  own auth — do not expose it publicly without adding
+  authentication.
+
 ## Troubleshooting
 
 ### SQL Server: `Failed to connect to QYLA:1433 - Could not connect (sequence)`
