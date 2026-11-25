@@ -4,18 +4,21 @@
 [![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)](https://www.typescriptlang.org/)
 [![Postgres](https://img.shields.io/badge/Postgres-16-blue.svg)](https://www.postgresql.org/)
+[![CI](https://github.com/sybrius/cictus/actions/workflows/ci.yml/badge.svg)](https://github.com/sybrius/cictus/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/sybrius/cictus)](https://github.com/sybrius/cictus/releases)
 
 **Cictus** is an open-source web app that migrates database tables, schema,
-data and views from **SQL Server** or **MySQL** to **PostgreSQL** — NHost,
-Supabase, or any plain Postgres server. It is built for teams moving an
-existing application database to Postgres without hand-writing the DDL:
-point it at a source, pick tables and views, review the type mapping, and
-migrate with live progress, per-table validation, and a full run history.
+data and views from **SQL Server, MySQL, PostgreSQL, Oracle or SQLite**
+to **PostgreSQL** — NHost, Supabase, or any plain Postgres server. It is
+built for teams moving an existing application database to Postgres
+without hand-writing the DDL: point it at a source, pick tables and
+views, review the type mapping, and migrate with live progress,
+per-table validation, and a full run history.
 
-- **Sources:** SQL Server, MySQL
+- **Sources:** SQL Server, MySQL, PostgreSQL, Oracle, SQLite (file)
 - **Targets:** NHost (Hasura), Supabase, generic PostgreSQL
 - **Stack:** Next.js 14 (App Router), TypeScript, Tailwind, `mssql`,
-  `mysql2`, `pg`, DuckDB for local run history
+  `mysql2`, `pg`, `oracledb`, `node:sqlite`, DuckDB for local run history
 
 ## Features
 
@@ -97,6 +100,30 @@ migrate with live progress, per-table validation, and a full run history.
 | PostgreSQL | Any Postgres host/port/database/user/password | Nothing extra |
 
 Use the direct 5432 connection (not the 6543 pooler) for DDL and bulk loads.
+
+## How Cictus compares
+
+Cictus is new — first release November 2026, single maintainer — so here
+is an honest comparison with the established options (star counts as of
+November 2026).
+
+| | Cictus | pgloader | Airbyte |
+|---|---|---|---|
+| Approach | Visual 6-step wizard + API | Single-command CLI | Full ELT platform |
+| Sources | SQL Server, MySQL, Postgres, Oracle, SQLite | MySQL, Postgres, SQLite, SQL Server, CSV and more | 700+ connectors |
+| Targets | Postgres (NHost, Supabase, plain) | Postgres | Postgres, warehouses, data lakes |
+| Scheduling | Built-in cron schedules | External (cron / systemd) | Built-in |
+| Bulk load | `COPY` for 5,000+ rows | `COPY`-based | Batch |
+| Hasura auto-track | Yes | No | No |
+| Self-host | `npm run dev` (Docker image planned) | Binary / Docker | Docker / Cloud |
+| License | MIT | PostgreSQL licence | ELv2 |
+| Maturity | New, single maintainer | Established since 2010 (6,563 stars) | Company-backed (22,422 stars) |
+
+If you need a scriptable one-command migration today, pgloader is the
+established choice. If you need hundreds of connectors and a hosted
+platform, Airbyte. Cictus fits when you want a visual,
+review-before-you-migrate flow to Postgres, with scheduling and Hasura
+auto-track built in.
 
 ## Quick start
 
@@ -488,11 +515,40 @@ Most common causes, in order, for a local server:
   line; check what construct was not converted and adjust the view or
   the converter (`src/lib/ddl.ts`).
 
+## FAQ
+
+**Do I need a live source database to try Cictus?**
+Yes — point it at a real source and a Postgres target. A bundled sample
+database with a one-command demo migration is on the roadmap.
+
+**Can Cictus migrate stored procedures, functions or triggers?**
+No — tables, views and data only. See [Limitations](#limitations).
+
+**What happens if some rows break a foreign key?**
+The data stays. The FK is reported by constraint name and skipped; the
+run continues. Clean the orphaned rows in the source, or drop that FK
+in the target.
+
+**Does it work with Supabase and NHost?**
+Yes — both are Postgres targets. NHost also gets Hasura auto-track:
+created tables and views are tracked in the GraphQL API automatically.
+
+**Is it safe to expose the app publicly?**
+No. Run it on localhost or behind your own auth — it holds database
+credentials in memory for the duration of a request and has no built-in
+auth yet. Opt-in auth is on the roadmap.
+
+**How do I run a migration on a schedule?**
+Use the Schedules page: pick a saved source → target pair, a table/view
+selection and a cron expression. The server ticks every minute and runs
+each due schedule with the same engine as a manual run; schedules only
+run while the server is running.
+
 ## API routes
 
 | Route | Purpose |
 |---|---|
-| `POST /api/source/test` | Test the source connection (SQL Server or MySQL). |
+| `POST /api/source/test` | Test the source connection (any supported source). |
 | `POST /api/source/diagnose` | DNS + TCP check for the source host/port, no login. |
 | `POST /api/source/schema` | Introspect tables, columns, PKs, FKs, indexes, views, row counts. |
 | `POST /api/target/test` | Test the Postgres connection (+ PostGIS check). |
@@ -511,32 +567,50 @@ src/
     migrate/page.tsx            6-step wizard
     connectors/page.tsx         Saved connectors
     history/page.tsx            Run history
+    schedules/page.tsx          Scheduled migrations
     layout.tsx / globals.css
-    api/source/test|schema|diagnose/route.ts
+    api/source/test|schema|diagnose|upload/route.ts
     api/target/test/route.ts
     api/migrate/route.ts        SSE streaming migration
     api/migrate/ddl/route.ts    SQL script download
     api/connectors/route.ts     Connector CRUD
     api/connectors/test/route.ts
+    api/hasura/test/route.ts    Hasura connection test
     api/history/route.ts        Run list + stats
     api/history/[id]/route.ts   Run detail
+    api/schedules/route.ts      Schedule CRUD
+    api/schedules/[id]/route.ts
+    api/schedules/[id]/run/route.ts
+    api/schedules/tick/route.ts
   components/
-    ConnectionForm.tsx  SourceConnectionForm / TargetConnectionForm
+    ui.tsx              Shared UI kit (cards, buttons, badges)
+    Sidebar.tsx         Collapsible sidebar
+    Topbar.tsx          Breadcrumbs + status
+    BrandIcons.tsx      Provider brand marks
+    ConnectionForm.tsx  Source/target connection forms
     SchemaTree.tsx      Table/view picker with row counts
     TypeMappingTable.tsx Editable type map
     MigrationLog.tsx    Auto-scrolling log
     ProgressBar.tsx
-    Sidebar.tsx
+  instrumentation.ts    Starts the scheduler (dev/server runtime)
   lib/
-    type-map.ts         SQL Server / MySQL → Postgres mapping + warnings
-    sqlserver.ts        mssql pool, introspection, batched row streaming
-    mysql.ts            mysql2 pool, introspection, batched row streaming
+    type-map.ts         Source → Postgres type mapping + warnings
+    sqlserver.ts        mssql pool, introspection, batched streaming
+    mysql.ts            mysql2 pool, introspection, batched streaming
+    postgres-source.ts  Postgres as a source
+    oracle.ts           oracledb thin mode, introspection, streaming
+    sqlite.ts           node:sqlite, read-only file introspection
     postgres.ts         pg Pool, connection test, transactional DDL
-    ddl.ts              DDL generation + view conversion (T-SQL / MySQL)
-    migrate-data.ts     Batched copy, coercion, identity-sequence fix
+    ddl.ts              DDL generation + view conversion (all dialects)
+    migrate-data.ts     Batched + COPY bulk load, identity-sequence fix
+    run-migration.ts    Shared migration engine (manual + scheduled)
+    source-dispatch.ts  Dispatch on source type
     connectors.ts       Saved connectors (local JSON store)
     resolve-connector.ts Resolve connector id / form payload + source type
     history-db.ts       DuckDB run history (globalThis singleton)
+    scheduler.ts        Schedule ticking + background runs
+    cron.ts             5-field cron parsing + next-run calculation
+    hasura.ts           Hasura Metadata API (pg_track_table)
 ```
 
 ## Contributing
@@ -573,11 +647,24 @@ before the code is written.
 
 ## Roadmap
 
+Done so far:
+
 - [x] PostgreSQL → PostgreSQL migrations (same engine, different source)
 - [x] Oracle / SQLite sources
 - [x] Scheduled / recurring migrations
 - [x] `COPY`-based bulk load for very large tables
 - [x] Hasura metadata API integration (auto-track tables after migration)
+
+Next:
+
+- [ ] Docker image + Compose demo (app + local Postgres target)
+- [ ] Bundled sample database for a one-command demo migration
+- [ ] CLI / headless mode reusing the migration engine
+- [ ] Unit-test suite (Vitest) wired into CI
+- [ ] Benchmarks vs pgloader on the sample dataset
+- [ ] `docs/` on GitHub Pages
+- [ ] Opt-in authentication for self-hosted use
+- [ ] Coordinated launch: Show HN, r/PostgreSQL, awesome-postgres
 
 ## Security
 
