@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { listRuns, historyStats } from '@/lib/history-db';
+import { listRuns, historyStats, historyUnavailableReason } from '@/lib/history-db';
 
 function serialise(run: Record<string, unknown>) {
   return {
@@ -12,7 +12,13 @@ function serialise(run: Record<string, unknown>) {
 export async function GET() {
   try {
     const [runs, stats] = await Promise.all([listRuns(50), historyStats()]);
-    return NextResponse.json({ ok: true, runs: runs.map((r) => serialise(r as unknown as Record<string, unknown>)), stats });
+    const reason = historyUnavailableReason();
+    return NextResponse.json({
+      ok: true,
+      runs: runs.map((r) => serialise(r as unknown as Record<string, unknown>)),
+      stats,
+      ...(reason ? { historyUnavailable: true, historyReason: reason } : {}),
+    });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

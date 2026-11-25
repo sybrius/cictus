@@ -1,4 +1,3 @@
-import { DuckDBInstance } from '@duckdb/node-api';
 import fs from 'fs';
 import path from 'path';
 
@@ -28,6 +27,17 @@ import path from 'path';
  * connection from that instance (closed afterwards), so concurrent
  * reads — e.g. the History page loading runs and stats together —
  * do not share one connection.
+ *
+ * Degraded mode: the DuckDB native module (`duckdb.node`) is loaded
+ * lazily, on first use — never at import time. If the machine blocks
+ * the native file (e.g. a Windows Application Control policy), the
+ * import fails and the app keeps running without persisted history:
+ * migrations still work, runs are simply not recorded, and schedules
+ * live only in memory until the server restarts. The History page
+ * shows a notice in that case (see `historyUnavailableReason()`).
+ * This matters because a failed static import would otherwise kill
+ * the whole server at startup — the instrumentation hook imports
+ * the scheduler, which imports this module.
  */
 
 export interface MigrationRun {
@@ -120,12 +130,19 @@ function normaliseRows<T extends Record<string, unknown>>(rows: T[]): T[] {
   });
 }
 
-type DuckDBInstanceType = Awaited<ReturnType<typeof DuckDBInstance.create>>;
+type DuckDBModule = typeof import('@duckdb/node-api');
+type DuckDBInstanceType = Awaited<ReturnType<DuckDBModule['DuckDBInstance']['create']>>;
 type DuckDBConnectionType = Awaited<ReturnType<DuckDBInstanceType['connect']>>;
 
 interface DuckDbGlobal {
   instancePromise?: Promise<DuckDBInstanceType> | null;
   initPromise?: Promise<void> | null;
+  /** Cached result of the lazy native-module import (null = failed). */
+  modulePromise?: Promise<DuckDBModule | null> | null;
+  /** Set when the native module failed to load; null while untested. */
+  moduleError?: string | null;
+  /** Schedules kept in memory while DuckDB is unavailable. */
+  memorySchedules?: Map<string, Schedule>;
 }
 const duckDbGlobal = globalThis as typeof globalThis & { __cictusDuckDb?: DuckDbGlobal };
 
@@ -140,11 +157,52 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  holding the lock (e.g. a just-stopped dev server still closing).
  *  If it stays locked, fail with a message that says what to do
  *  instead of the raw DuckDB IO error. */
-async function openWithRetry(file: string, attempts = 5): Promise<DuckDBInstanceType> {
+/** Load the DuckDB native module lazily, on first use — never at
+ * import time. If the file is blocked (e.g. a Windows Application
+ * Control policy refuses `duckdb.node`), the import rejects, the
+ * reason is cached on the shared store, and every history/schedule
+ * call degrades gracefully instead of crashing the server. */
+async function loadDuckDbModule(): Promise<DuckDBModule | null> {
+  const store = getStore();
+  if (store.modulePromise) return store.modulePromise;
+  store.modulePromise = import('@duckdb/node-api')
+    .then((mod) => {
+      store.moduleError = null;
+      return mod;
+    })
+    .catch((e) => {
+      // Keep only the first line — the raw message can carry a long
+      // Node require stack that would look awful in the UI banner.
+      const msg = (e instanceof Error ? e.message : String(e)).split('\n')[0];
+      store.moduleError = msg;
+      console.warn(
+        '[cictus] DuckDB native module could not be loaded — migration history will not be recorded ' +
+          'and schedules will only live in memory until the server restarts. Migrations themselves ' +
+          `still work. Reason: ${msg}`,
+      );
+      return null;
+    });
+  return store.modulePromise;
+}
+
+/** Non-null when the DuckDB native module failed to load in this
+ * process. Read it after a history call (e.g. listRuns) so the
+ * load has been attempted. */
+export function historyUnavailableReason(): string | null {
+  return getStore().moduleError ?? null;
+}
+
+function getMemorySchedules(): Map<string, Schedule> {
+  const store = getStore();
+  if (!store.memorySchedules) store.memorySchedules = new Map();
+  return store.memorySchedules;
+}
+
+async function openWithRetry(mod: DuckDBModule, file: string, attempts = 5): Promise<DuckDBInstanceType> {
   let last: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await DuckDBInstance.create(file);
+      return await mod.DuckDBInstance.create(file);
     } catch (e) {
       last = e;
       const msg = String((e as Error)?.message ?? e);
@@ -159,12 +217,16 @@ async function openWithRetry(file: string, attempts = 5): Promise<DuckDBInstance
   );
 }
 
-async function getInstance(): Promise<DuckDBInstanceType> {
+/** The shared instance, or null when the native module could not be
+ * loaded (degraded mode — callers fall back, see withConnection). */
+async function getInstance(): Promise<DuckDBInstanceType | null> {
+  const mod = await loadDuckDbModule();
+  if (!mod) return null;
   const store = getStore();
   if (!store.instancePromise) {
     const dir = path.dirname(dbPath());
     fs.mkdirSync(dir, { recursive: true });
-    store.instancePromise = openWithRetry(dbPath()).catch((e) => {
+    store.instancePromise = openWithRetry(mod, dbPath()).catch((e) => {
       store.instancePromise = null; // allow a later call to retry
       throw e;
     });
@@ -228,9 +290,13 @@ async function ensureSchema(conn: DuckDBConnectionType): Promise<void> {
 }
 
 /** Run `fn` on a fresh connection from the shared instance, creating
- *  the tables once. The connection is always closed afterwards. */
-async function withConnection<T>(fn: (conn: DuckDBConnectionType) => Promise<T>): Promise<T> {
+ *  the tables once. The connection is always closed afterwards.
+ * Returns null when DuckDB is unavailable (degraded mode) — callers
+ * fall back instead of throwing, so a blocked native module never
+ * breaks a migration or a page load. */
+async function withConnection<T>(fn: (conn: DuckDBConnectionType) => Promise<T>): Promise<T | null> {
   const instance = await getInstance();
+  if (!instance) return null;
   const conn = await instance.connect();
   try {
     const store = getStore();
@@ -296,7 +362,7 @@ export async function recordRunFinish(run: {
 }
 
 export async function listRuns(limit = 50): Promise<MigrationRun[]> {
-  return withConnection(async (conn) => {
+  const rows = await withConnection(async (conn) => {
     const reader = await conn.runAndReadAll(
       `SELECT id, started_at, finished_at, status, source_name, target_name, target_type,
        tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
@@ -305,6 +371,7 @@ export async function listRuns(limit = 50): Promise<MigrationRun[]> {
     );
     return normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]) as unknown as MigrationRun[];
   });
+  return rows ?? [];
 }
 
 export async function getRun(id: string): Promise<{
@@ -312,7 +379,7 @@ export async function getRun(id: string): Promise<{
   tables: MigrationTableResult[];
   errors: MigrationError[];
 }> {
-  return withConnection(async (conn) => {
+  const result = await withConnection(async (conn) => {
     const runs = await conn.runAndReadAll(
       `SELECT id, started_at, finished_at, status, source_name, target_name, target_type,
        tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
@@ -332,6 +399,7 @@ export async function getRun(id: string): Promise<{
       errors: normaliseRows(errors.getRowObjects() as unknown as Record<string, unknown>[]) as unknown as MigrationError[],
     };
   });
+  return result ?? { run: null, tables: [], errors: [] };
 }
 
 export async function historyStats(): Promise<{
@@ -342,7 +410,7 @@ export async function historyStats(): Promise<{
   totalErrors: number;
   lastRunAt: string | null;
 }> {
-  return withConnection(async (conn) => {
+  const stats = await withConnection(async (conn) => {
     const reader = await conn.runAndReadAll(
       `SELECT count(*) AS total_runs,
        sum(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
@@ -362,6 +430,7 @@ export async function historyStats(): Promise<{
       lastRunAt: row.last_run_at ? String(row.last_run_at) : null,
     };
   });
+  return stats ?? { totalRuns: 0, completedRuns: 0, totalRows: 0, totalTables: 0, totalErrors: 0, lastRunAt: null };
 }
 
 /* ── Schedules ─────────────────────────────────────────────── */
@@ -402,24 +471,29 @@ const SCHEDULE_COLS = `id, name, source_connector_id, target_connector_id, table
   next_run_at, created_at`;
 
 export async function listSchedules(): Promise<Schedule[]> {
-  return withConnection(async (conn) => {
+  const rows = await withConnection(async (conn) => {
     const reader = await conn.runAndReadAll(`SELECT ${SCHEDULE_COLS} FROM schedules ORDER BY created_at DESC`);
     return normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]).map(scheduleRowToSchedule);
   });
+  if (rows !== null) return rows;
+  // Degraded mode: schedules created while DuckDB is unavailable live
+  // only in memory, until the server restarts.
+  return [...getMemorySchedules().values()].sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 }
 
 export async function getSchedule(id: string): Promise<Schedule | null> {
-  return withConnection(async (conn) => {
+  const found = await withConnection(async (conn) => {
     const reader = await conn.runAndReadAll(`SELECT ${SCHEDULE_COLS} FROM schedules WHERE id = ${esc(id)}`);
     const rows = normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]);
     return rows[0] ? scheduleRowToSchedule(rows[0]) : null;
   });
+  return found ?? getMemorySchedules().get(id) ?? null;
 }
 
 /** Insert or replace a schedule (delete + insert keeps it simple and
  *  avoids relying on ON CONFLICT support). */
 export async function saveSchedule(s: Schedule): Promise<void> {
-  await withConnection(async (conn) => {
+  const ran = await withConnection(async (conn) => {
     await conn.run(`DELETE FROM schedules WHERE id = ${esc(s.id)}`);
     await conn.run(
       `INSERT INTO schedules
@@ -434,12 +508,14 @@ export async function saveSchedule(s: Schedule): Promise<void> {
        ${s.createdAt ? esc(s.createdAt) : 'now()'})`,
     );
   });
+  if (ran === null) getMemorySchedules().set(s.id, s);
 }
 
 export async function deleteSchedule(id: string): Promise<void> {
-  await withConnection(async (conn) => {
+  const ran = await withConnection(async (conn) => {
     await conn.run(`DELETE FROM schedules WHERE id = ${esc(id)}`);
   });
+  if (ran === null) getMemorySchedules().delete(id);
 }
 
 export async function updateScheduleRun(id: string, patch: {
@@ -449,7 +525,7 @@ export async function updateScheduleRun(id: string, patch: {
   nextRunAt?: string | null;
   enabled?: boolean;
 }): Promise<void> {
-  await withConnection(async (conn) => {
+  const ran = await withConnection(async (conn) => {
     const sets: string[] = [];
     if (patch.lastRunAt !== undefined) sets.push(`last_run_at = ${patch.lastRunAt ? esc(patch.lastRunAt) : 'NULL'}`);
     if (patch.lastStatus !== undefined) sets.push(`last_status = ${patch.lastStatus ? esc(patch.lastStatus) : 'NULL'}`);
@@ -459,4 +535,13 @@ export async function updateScheduleRun(id: string, patch: {
     if (!sets.length) return;
     await conn.run(`UPDATE schedules SET ${sets.join(', ')} WHERE id = ${esc(id)}`);
   });
+  if (ran === null) {
+    const s = getMemorySchedules().get(id);
+    if (!s) return;
+    if (patch.lastRunAt !== undefined) s.lastRunAt = patch.lastRunAt;
+    if (patch.lastStatus !== undefined) s.lastStatus = patch.lastStatus;
+    if (patch.lastRunId !== undefined) s.lastRunId = patch.lastRunId;
+    if (patch.nextRunAt !== undefined) s.nextRunAt = patch.nextRunAt;
+    if (patch.enabled !== undefined) s.enabled = patch.enabled;
+  }
 }

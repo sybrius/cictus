@@ -33,6 +33,7 @@ export default function HistoryPage() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -41,6 +42,7 @@ export default function HistoryPage() {
     fetch('/api/history').then((r) => r.json()).then((j) => {
       if (!j.ok) throw new Error(j.error ?? 'Could not load history');
       setRuns(j.runs ?? []);
+      if (j.historyUnavailable) setHistoryNotice(j.historyReason ?? 'The DuckDB history file could not be loaded on this machine.');
     }).catch((e) => setError(e instanceof Error ? e.message : String(e))).finally(() => setLoading(false));
   }, []);
 
@@ -69,6 +71,12 @@ export default function HistoryPage() {
       />
 
       {error && <Alert>{error}</Alert>}
+
+      {historyNotice && (
+        <Alert>
+          Run history is unavailable: {historyNotice} Migrations still work — runs just are not being recorded, and schedules live only in memory until the server restarts. See Troubleshooting in the README to restore it.
+        </Alert>
+      )}
 
       {loading ? (
         <div className="space-y-3">

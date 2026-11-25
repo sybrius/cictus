@@ -510,6 +510,22 @@ Most common causes, in order, for a local server:
 - `IO Error: Cannot open file …\data\migrations.duckdb` — another
   `node.exe` (a stale dev server) holds the DuckDB file. End the extra
   `node.exe` in Task Manager and restart `npm run dev`.
+- `Error: An error occurred while loading instrumentation hook: An
+  Application Control policy has blocked this file.
+  …\node_modules\@duckdb\node-bindings-win32-x64\duckdb.node` —
+  Windows Application Control (WDAC / AppLocker) is blocking the
+  DuckDB native module from loading. The app still starts — history
+  is just disabled (migrations work; runs are not recorded and
+  schedules live only in memory). To restore history, unblock the
+  file — in PowerShell as Administrator:
+  ```powershell
+  Unblock-File -Path "C:\Data\Projects\Cictus-ETL\cictus\node_modules\@duckdb\node-bindings-win32-x64\duckdb.node"
+  ```
+  then restart `npm run dev`. If the block persists, check Windows
+  Security → Protection history for the rule that fired, or ask your
+  IT admin to allow the file or the project folder in the Application
+  Control policy. Reinstalling dependencies does not fix a policy
+  block.
 - A view fails with `syntax error at or near …` — the failed view's
   converted SQL is printed in the dev-server log on the `View failed:`
   line; check what construct was not converted and adjust the view or

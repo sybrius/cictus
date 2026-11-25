@@ -51,6 +51,7 @@ export default function Dashboard() {
   const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -62,6 +63,7 @@ export default function Dashboard() {
         if (!h.ok) throw new Error(h.error ?? 'Could not load history');
         setRuns(h.runs ?? []);
         setStats(h.stats ?? null);
+        if (h.historyUnavailable) setHistoryNotice(h.historyReason ?? 'The DuckDB history file could not be loaded on this machine.');
         setConnectors(c.connectors ?? []);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -92,6 +94,12 @@ export default function Dashboard() {
       />
 
       {error && <Alert>{error}</Alert>}
+
+      {historyNotice && (
+        <Alert>
+          Run history is unavailable: {historyNotice} Migrations still work — runs just are not being recorded, and schedules live only in memory until the server restarts. See Troubleshooting in the README to restore it.
+        </Alert>
+      )}
 
       {loading ? (
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
