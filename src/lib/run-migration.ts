@@ -205,10 +205,10 @@ export async function executeMigration(job: MigrationJob, cb: MigrationCallbacks
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           // A dropped connection to SQL Server (socket hang up,
-          // ECONNRESET, timeout) is usually transient — QYLA is on
-          // Wi-Fi — so retry the table once before giving up on it.
-          // A retry that also fails is recorded and the run moves
-          // on to the next table, as before.
+          // ECONNRESET, timeout) is usually transient, so retry the
+          // table once before giving up on it. A retry that also
+          // fails is recorded and the run moves on to the next
+          // table, as before.
           if (/socket hang up|connection lost|ECONNRESET|ESOCKET|ETIMEDOUT|timed out|network/i.test(msg)) {
             cb.log(`Connection error copying ${table.schema}.${table.name} — retrying once: ${msg}`);
             try {

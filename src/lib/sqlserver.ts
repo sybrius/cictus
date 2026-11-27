@@ -5,18 +5,79 @@ import net from 'node:net';
 
 /** Connection settings supplied by the wizard (never stored server-side
  *  beyond the request that uses them). */
+export const SQL_SERVER_DEFAULT_PORT = 1433;
+
+/** Split a host value typed in SSMS style — `host,port`,
+ *  `host:port`, `host\INSTANCE` or `host\INSTANCE,port` — into its
+ *  parts. SSMS accepts `host,port`, so users paste it into the Host
+ *  field anyway; without this the DNS lookup runs on the whole
+ *  string (e.g. `sharedmssql10.securehostdns.com,1234`) and fails
+ *  with `getaddrinfo EBUSY`. The embedded port wins only when the
+ *  Port field is still the default (1433): an explicitly set port is
+ *  the deliberate control. The host is cleaned either way, so a
+ *  pasted `,port` can never break the lookup. */
+export function normalizeSqlServerHost(
+  host: string,
+  port: number,
+  instance?: string,
+): { host: string; port: number; instance?: string } {
+  let h = host.trim();
+  let p = port;
+  let inst = instance?.trim() || undefined;
+
+  // Bracketed IPv6 with a port: [::1]:1433
+  const bracket = h.match(/^\[([^\]]+)\]:(\d+)$/);
+  if (bracket) {
+    if (p === SQL_SERVER_DEFAULT_PORT) p = Number(bracket[2]);
+    return { host: `[${bracket[1]}]`, port: p, instance: inst };
+  }
+  // Trailing ,port or :port. The colon case requires exactly one
+  // colon, so a bare IPv6 address (several colons) is untouched.
+  const m = h.match(/^(.*?)[,:](\d+)$/);
+  if (m && (h.includes(',') || h.indexOf(':') === h.lastIndexOf(':'))) {
+    h = m[1];
+    if (p === SQL_SERVER_DEFAULT_PORT) p = Number(m[2]);
+  }
+  // Named instance pasted into the Host field: HOST\INSTANCE. The
+  // separate Instance field wins when it is already set.
+  const bs = h.indexOf('\\');
+  if (bs !== -1) {
+    const after = h.slice(bs + 1).trim();
+    h = h.slice(0, bs).trim();
+    if (!inst && after) inst = after;
+  }
+  return { host: h, port: p, instance: inst };
+}
+
 export const SqlServerConfigSchema = z.object({
   host: z.string().min(1, 'Host is required'),
-  port: z.coerce.number().int().min(1).max(65535).default(1433),
+  port: z.coerce.number().int().min(1).max(65535).default(SQL_SERVER_DEFAULT_PORT),
   user: z.string().min(1, 'User is required'),
   password: z.string().min(1, 'Password is required'),
   database: z.string().min(1, 'Database is required'),
   trustCert: z.boolean().default(true),
   encrypt: z.boolean().default(true),
   instance: z.string().optional(),
+}).transform((v) => {
+  const n = normalizeSqlServerHost(v.host, v.port, v.instance);
+  return { ...v, host: n.host, port: n.port, instance: n.instance };
 });
 
 export type SqlServerConfig = z.infer<typeof SqlServerConfigSchema>;
+
+/** True for a bare machine name (e.g. a PC name) — the only case
+ *  where "try localhost instead" is useful advice. Never true for
+ *  a remote FQDN, an IP address, or localhost itself, so error
+ *  hints never tell a user with a hosted server to use localhost. */
+export function looksLikeLocalMachineName(host: string): boolean {
+  const h = host.trim();
+  return (
+    !!h &&
+    !h.includes('.') &&
+    !/^\d+\.\d+\.\d+\.\d+$/.test(h) &&
+    h.toLowerCase() !== 'localhost'
+  );
+}
 
 export interface ColumnInfo {
   schema: string;
@@ -104,34 +165,54 @@ function toConfig(cfg: SqlServerConfig, encryptOverride?: boolean): sql.config {
  *  "Could not connect (sequence)" is the pre-login handshake failing:
  *  TCP opened (or was reset) but SQL Server never completed login —
  *  almost always TCP/IP disabled, a named instance on a dynamic port,
- *  the service stopped, a firewall, or a TLS handshake failure. */
-export function explainSqlServerError(err: unknown): string {
+ *  the service stopped, a firewall, or a TLS handshake failure.
+ *
+ *  `cfg` is the connection the error came from: every hint names the
+ *  host / port / instance actually attempted, never a hardcoded
+ *  example — a hosted server must not be told to check a local PC
+ *  name, and the "try localhost" line only appears for a bare
+ *  machine name. */
+export function explainSqlServerError(
+  err: unknown,
+  cfg: { host: string; port: number; instance?: string },
+): string {
   const e = err as { code?: string; message?: string; originalError?: { code?: string } };
   const msg = e?.message ?? String(err);
   const code = e?.code ?? e?.originalError?.code ?? '';
+  const host = cfg.host.trim();
+  const port = cfg.port;
+  const instance = cfg.instance?.trim() || '';
   if (/could not connect \(sequence\)/i.test(msg) || code === 'ESOCKET') {
+    const instanceHint = instance
+      ? `(2) it is a named instance (${host}\\${instance}) — the port is resolved through the SQL Browser (UDP 1434), so the Browser service must be running and UDP 1434 open; if the Browser is blocked, put the instance's actual TCP port in the Port field and clear the Instance field; `
+      : `(2) it is a named instance (e.g. ${host}\\SQLEXPRESS) on a dynamic port, not ${port} — put SQLEXPRESS in the Instance field and leave Port blank, and make sure the SQL Server Browser service is running; `;
     return (
       `${msg} — the pre-login handshake failed. ` +
       `This usually means: (1) SQL Server is not listening on that host:port — ` +
       `check SQL Server Configuration Manager → SQL Server Network Configuration → ` +
-      `Protocols → TCP/IP is Enabled, IPAll TCP Port is 1433, and the service was restarted; ` +
-      `(2) it is a named instance (e.g. QYLA\\SQLEXPRESS) on a dynamic port, not 1433 — ` +
-      `put SQLEXPRESS in the Instance field and leave Port blank, and make sure the ` +
-      `SQL Server Browser service is running; (3) the service is stopped or Windows ` +
-      `Firewall is blocking 1433 — test with: Test-NetConnection QYLA -Port 1433; ` +
+      `Protocols → TCP/IP is Enabled, IPAll TCP Port is ${port}, and the service was restarted; ` +
+      instanceHint +
+      `(3) the service is stopped or Windows Firewall is blocking ${port} — test with: Test-NetConnection ${host} -Port ${port}; ` +
       `(4) TLS: the app first tries encryption on, then retries with it off — if the ` +
-      `retry also fails, it is not a TLS problem. Try Host "localhost" instead of "QYLA" ` +
-      `if the app runs on the same PC.`
+      `retry also fails, it is not a TLS problem.` +
+      (looksLikeLocalMachineName(host)
+        ? ` Try Host "localhost" instead of "${host}" if the app runs on the same PC.`
+        : '')
     );
   }
   if (code === 'ECONNREFUSED' || /ECONNREFUSED/i.test(msg)) {
     return `${msg} — nothing is listening on that host:port. SQL Server is stopped, TCP/IP is disabled, or it listens on a different (dynamic) port. See the TCP/IP / named-instance checks above.`;
   }
   if (code === 'ENOTFOUND' || /ENOTFOUND|getaddrinfo/i.test(msg)) {
-    return `${msg} — the host name "${''}" could not be resolved. If the app runs on the same PC as SQL Server, use "localhost" or "127.0.0.1" instead of the PC name; if it runs in Docker/WSL, use the PC's IP address or host.docker.internal.`;
+    return (
+      `${msg} — the host name "${host}" could not be resolved from where the app is running.` +
+      (looksLikeLocalMachineName(host)
+        ? ` If the app runs on the same PC as SQL Server, use "localhost" or "127.0.0.1" instead of the PC name; if it runs in Docker/WSL, use the PC's IP address or host.docker.internal.`
+        : ` Check the spelling, and that this machine can reach that DNS name (VPN, private DNS, or a name that only resolves inside your network).`)
+    );
   }
   if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
-    return `${msg} — no reply within 15s. The host may be unreachable, the port blocked by a firewall, or SQL Server is starting up. Test with: Test-NetConnection <host> -Port <port>.`;
+    return `${msg} — no reply within 15s. The host may be unreachable, the port blocked by a firewall, or SQL Server is starting up. Test with: Test-NetConnection ${host} -Port ${port}.`;
   }
   if (code === 'ELOGIN' || /login failed/i.test(msg)) {
     return `${msg} — the server answered, but the login was rejected. Check the username/password, that SQL Server authentication (not only Windows auth) is enabled, and that the login has access to the database.`;
@@ -155,7 +236,11 @@ export async function diagnoseSqlServer(cfg: SqlServerConfig): Promise<{
     return {
       dns: dnsResult,
       tcp: { ok: false, error: 'Skipped — DNS failed' },
-      hint: `Host "${cfg.host}" does not resolve from where the app is running. If the app runs on the same PC as SQL Server, use "localhost" or "127.0.0.1". If it runs in Docker/WSL, use the PC's LAN IP or host.docker.internal.`,
+      hint:
+        `Host "${cfg.host}" does not resolve from where the app is running.` +
+        (looksLikeLocalMachineName(cfg.host)
+          ? ` If the app runs on the same PC as SQL Server, use "localhost" or "127.0.0.1". If it runs in Docker/WSL, use the PC's LAN IP or host.docker.internal.`
+          : ` Check the spelling, and that this machine can reach that DNS name.`),
     };
   }
 
@@ -239,7 +324,7 @@ export async function testSqlServerConnection(cfg: SqlServerConfig): Promise<{
       if (encryptOverride === false) break;
     }
   }
-  return { ok: false, error: explainSqlServerError(lastError) };
+  return { ok: false, error: explainSqlServerError(lastError, cfg) };
 }
 
 const SCHEMA_SQL = `

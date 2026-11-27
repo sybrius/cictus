@@ -184,7 +184,7 @@ export default function ConnectorsPage() {
               ) : (
                 <>
                   <Field label={`Host${(type === 'sqlserver' || type === 'mysql' || type === 'oracle') ? '' : ' (optional if project ref / connection string is given)'}`}>
-                    <input className={inputCls} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'QYLA' : type === 'mysql' ? 'localhost' : type === 'oracle' ? 'oracle-host' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} />
+                    <input className={inputCls} value={String(form.host)} onChange={set('host')} placeholder={type === 'sqlserver' ? 'localhost' : type === 'mysql' ? 'localhost' : type === 'oracle' ? 'oracle-host' : type === 'supabase' ? 'db.<project-ref>.supabase.co' : 'localhost'} />
                   </Field>
                   <Field label="Port"><input className={inputCls} type="number" value={Number(form.port)} onChange={set('port')} /></Field>
                   {type === 'oracle' ? (

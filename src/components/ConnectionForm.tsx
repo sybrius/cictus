@@ -242,7 +242,7 @@ export function SourceConnectionForm({
       <p className="text-xs leading-relaxed text-slate-500">
         Credentials are sent to the server only for this request and are never stored.
         {isSqlServer
-          ? ' If the host is a PC name like QYLA and the app runs on that same PC, try “localhost” instead — and for a named instance (QYLA\\SQLEXPRESS) put SQLEXPRESS in Instance and leave Port at 1433.'
+          ? ' If the host is a PC name and the app runs on that same PC, try “localhost” instead — and for a named instance (HOST\\SQLEXPRESS) put SQLEXPRESS in Instance and leave Port at 1433.'
           : isMysql
             ? ' If the app runs on the same machine as MySQL, use “localhost” — in Docker / WSL, use the host’s LAN IP or host.docker.internal. The MySQL user must be allowed to connect from this host (a user created as \'app\'@\'localhost\' cannot log in from another machine).'
             : isOracle
