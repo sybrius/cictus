@@ -24,7 +24,7 @@ import type { Connector } from './connectors';
  * the metadata HTTP API — metadata authoring still goes through the
  * Hasura host above, which is what this calls.
  *
- * The admin secret lives on the connector (data/connectors.json,
+ * The admin secret lives on the connector (in Turso, per user,
  * like the password) and is never sent to the browser. Tracking is
  * best-effort: if Hasura is unreachable or rejects a table, the
  * failure is logged and reported per table — the migration itself

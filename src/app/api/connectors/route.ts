@@ -1,19 +1,19 @@
 import { NextResponse } from 'next/server';
 import {
-  loadConnectors, saveConnector, deleteConnector, publicConnector,
+  getConnector, loadConnectors, saveConnector, deleteConnector, publicConnector,
   CONNECTOR_TYPES, type ConnectorInput,
 } from '@/lib/connectors';
-import { requireAuth } from '@/lib/api-auth';
+import { requireUser } from '@/lib/api-auth';
 
 export async function GET() {
-  const auth = await requireAuth();
-  if (auth) return auth;
-  return NextResponse.json({ ok: true, connectors: loadConnectors().map(publicConnector) });
+  const user = await requireUser();
+  if (user instanceof NextResponse) return user;
+  return NextResponse.json({ ok: true, connectors: (await loadConnectors(user.id)).map(publicConnector) });
 }
 
 export async function POST(req: Request) {
-  const auth = await requireAuth();
-  if (auth) return auth;
+  const user = await requireUser();
+  if (user instanceof NextResponse) return user;
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== 'object') {
     return NextResponse.json({ ok: false, error: 'Invalid body' }, { status: 400 });
@@ -58,10 +58,10 @@ export async function POST(req: Request) {
   }
   try {
     // Keep the existing password when editing without re-typing it.
-    const existing = body.id ? loadConnectors().find((c) => c.id === body.id) : undefined;
+    const existing = body.id ? await getConnector(user.id, String(body.id)) : undefined;
     if (existing && !input.password) input.password = existing.password;
     if (existing && !input.hasuraAdminSecret) input.hasuraAdminSecret = existing.hasuraAdminSecret ?? '';
-    const saved = saveConnector(input, body.id ? String(body.id) : undefined);
+    const saved = await saveConnector(user.id, input, body.id ? String(body.id) : undefined);
     return NextResponse.json({ ok: true, connector: publicConnector(saved) });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
@@ -69,10 +69,10 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
-  const auth = await requireAuth();
-  if (auth) return auth;
+  const user = await requireUser();
+  if (user instanceof NextResponse) return user;
   const id = new URL(req.url).searchParams.get('id');
   if (!id) return NextResponse.json({ ok: false, error: 'id is required' }, { status: 400 });
-  deleteConnector(id);
+  await deleteConnector(user.id, id);
   return NextResponse.json({ ok: true });
 }

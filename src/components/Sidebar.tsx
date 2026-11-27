@@ -167,7 +167,7 @@ export function Sidebar() {
             Sign out
           </button>
           <p className="mt-2 break-words text-[11px] leading-relaxed text-slate-400">
-            Turso history · connectors never leave this machine
+            Turso history · connectors stored per user in Turso
           </p>
         </div>
       ) : (

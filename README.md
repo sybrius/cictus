@@ -63,11 +63,15 @@ per-table validation, and a full run history.
   the wizard (Step 4) or per-schedule; it needs the Hasura admin
   secret saved on the target connector (never sent to the browser).
   See [Hasura auto-track](#hasura-auto-track).
-- **Saved connectors** — named, reusable source and target connections.
-  Passwords are stored only on the machine running the app
-  (`data/connectors.json`, git-ignored) and are never sent back to the
-  browser; the wizard sends only the connector id and the server
-  resolves the credentials.
+- **Saved connectors** — named, reusable source and target connections,
+  stored per user in your Turso database (`connectors` table). Passwords
+  are never sent back to the browser; the wizard sends only the
+  connector id and the server resolves the credentials. Because they
+  live in Turso, connectors work from any machine or deployment that
+  points at the same database — including serverless hosts (Vercel),
+  where no local file can be written. Connectors saved before this
+  change in the old local `data/connectors.json` are imported once,
+  automatically, the first time their owner lists connectors.
 - **Turso history** — every run is recorded in your Turso database
   (runs, per-table validation, errors) and shown on the Dashboard
   and History pages. History, schedules and accounts share one
@@ -201,9 +205,9 @@ No source/target database server is needed to run the app itself.
 | `NHOST_ADMIN_SECRET` | Hasura admin secret — server-side only, used by the Hasura auto-track step (and the "Test Hasura" button) when the secret is saved on the target connector. Never expose it to the browser. |
 
 **Credentials are never hardcoded and never stored server-side beyond the
-request that uses them** (except saved connectors, which live only in the
-local, git-ignored `data/connectors.json`). Each API route opens its own
-pool and closes it afterwards.
+request that uses them** (except saved connectors, which live per user in
+the Turso database). Each API route opens its own pool and closes it
+afterwards.
 
 ## How migration works
 
@@ -333,8 +337,11 @@ FROM migrations ORDER BY started_at DESC;
 
 `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` go in `.env.local`
 (never committed); see `.env.example`. The `data/` directory is
-git-ignored: `data/connectors.json` lives only on the machine that
-runs the app.
+git-ignored: it holds only SQLite files uploaded in the wizard
+(`data/uploads/`), which live only on the machine that runs the app —
+uploads do not work on a serverless host, where the filesystem is
+read-only. Connectors, history, schedules and accounts all live in
+Turso instead, so they work everywhere.
 
 If Turso is unavailable (env vars missing, or the database
 unreachable), the app keeps running in degraded mode: migrations
@@ -384,8 +391,9 @@ copy validates:
    NHost the endpoint is derived automatically
    (`https://<subdomain>.hasura.<region>.nhost.run`); for a plain
    Postgres target, paste the Hasura endpoint too. The secret is
-   stored only in the local `data/connectors.json` and is never sent
-   to the browser (the API only reports whether one is saved).
+   stored on the connector in Turso (per user, like the password) and
+   is never sent to the browser (the API only reports whether one is
+   saved).
    "Test Hasura" on the connector card checks the endpoint + secret
    with an `export_metadata` call.
 2. **Enable it for the run** — Step 4 of the wizard shows a "Track
@@ -657,7 +665,7 @@ src/
     migrate-data.ts     Batched + COPY bulk load, identity-sequence fix
     run-migration.ts    Shared migration engine (manual + scheduled)
     source-dispatch.ts  Dispatch on source type
-    connectors.ts       Saved connectors (local JSON store)
+    connectors.ts       Saved connectors (Turso, per user)
     resolve-connector.ts Resolve connector id / form payload + source type
     history-db.ts       Turso run history + schedules (via turso.ts)
     turso.ts            Turso client, schema, degraded mode
@@ -710,6 +718,7 @@ Done so far:
 - [x] Hasura metadata API integration (auto-track tables after migration)
 - [x] Turso history, schedules & accounts (replacing local DuckDB)
 - [x] Simple sign-up / login (bcrypt, sessions)
+- [x] Saved connectors in Turso, per user (replacing local data/connectors.json)
 
 Next:
 

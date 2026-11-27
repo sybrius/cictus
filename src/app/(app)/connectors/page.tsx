@@ -251,7 +251,8 @@ export default function ConnectorsPage() {
               <Button variant="secondary" onClick={() => setShowForm(false)}>Cancel</Button>
             </div>
             <p className="text-xs leading-relaxed text-slate-500">
-              Stored only on this machine in <span className="font-mono">data/connectors.json</span> (git-ignored).
+              Stored per user in your Turso database — they work from any machine or deployment that points at the same
+              database, including serverless hosts where no local file can be written.
               Passwords are never shown back in the browser and are only used server-side when you test or run a migration with that connector.
             </p>
           </div>

@@ -1,16 +1,16 @@
 import { NextResponse } from 'next/server';
-import { loadConnectors } from '@/lib/connectors';
+import { getConnector } from '@/lib/connectors';
 import { hasuraConfigForConnector, testHasuraConnection } from '@/lib/hasura';
-import { requireAuth } from '@/lib/api-auth';
+import { requireUser } from '@/lib/api-auth';
 
 /** POST { id } — test a saved NHost / Postgres connector's Hasura
  *  endpoint + admin secret (export_metadata round-trip, no changes). */
 export async function POST(req: Request) {
-  const auth = await requireAuth();
-  if (auth) return auth;
+  const user = await requireUser();
+  if (user instanceof NextResponse) return user;
   const body = await req.json().catch(() => null);
   const id = body?.id ? String(body.id) : '';
-  const c = loadConnectors().find((x) => x.id === id);
+  const c = await getConnector(user.id, id);
   if (!c) return NextResponse.json({ ok: false, error: 'Connector not found' }, { status: 404 });
   const cfg = hasuraConfigForConnector(c);
   if (!cfg) {

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { withTurso, tursoUnavailableReason } from './turso';
 
 /**
  * Saved connectors — the enterprise bit.
@@ -8,9 +9,20 @@ import crypto from 'crypto';
  * A connector is a named, reusable connection to one database:
  * a SQL Server source, or a Postgres target hosted on NHost,
  * Supabase, or any plain PostgreSQL server. Connectors are stored
- * locally in `data/connectors.json` (git-ignored, never committed,
- * never sent to any other service) and the migration wizard can
- * pick one instead of re-typing host / password every time.
+ * per user in Turso (the `connectors` table, scoped by `user_id`),
+ * and the migration wizard can pick one instead of re-typing host
+ * / password every time. The same account's connectors follow
+ * them to any machine or deployment that points at the same Turso
+ * database.
+ *
+ * Turso is also what makes connectors work on a serverless host:
+ * the old local `data/connectors.json` file cannot be written on
+ * Vercel (read-only filesystem — saving failed with
+ * `ENOENT: no such file or directory, mkdir '/var/task/data'`).
+ * A one-time import copies that file's entries into Turso the
+ * first time a user lists their connectors (see
+ * importLegacyConnectors); afterwards the file is never read or
+ * written again.
  *
  * Supabase is plain Postgres: the direct connection is
  * `db.<project-ref>.supabase.co:5432`, user `postgres`, database
@@ -111,35 +123,177 @@ export const CONNECTOR_TYPES: Record<ConnectorType, { label: string; kind: Conne
   },
 };
 
-function filePath(): string {
+/** Columns of the `connectors` table, in INSERT order. */
+const CONNECTOR_COLS = `id, user_id, name, kind, type, project_ref, region, host, port,
+  database, user, password, connection_string, ssl, instance, encrypt, trust_cert,
+  service, file_path, hasura_admin_secret, hasura_endpoint, created_at, updated_at,
+  last_tested_at, last_test_ok, last_test_message`;
+
+/** The 26 INSERT values for a connector row, in CONNECTOR_COLS order.
+ *  Defensive about missing fields: legacy file entries predate
+ *  some columns (service, filePath, Hasura fields), so every value
+ *  is coerced instead of passed through as undefined. */
+function connectorArgs(userId: string, c: Connector): (string | number | null)[] {
+  const s = (v: unknown, d = ''): string => (typeof v === 'string' ? v : v === undefined || v === null ? d : String(v));
+  const b = (v: unknown, d: boolean): number => (v === 1 || v === true ? 1 : v === 0 || v === false ? 0 : d ? 1 : 0);
+  return [
+    s(c.id), userId, s(c.name), c.kind === 'target' ? 'target' : 'source', s(c.type, 'postgres'),
+    s(c.projectRef), s(c.region), s(c.host), Number(c.port ?? 0) || 0,
+    s(c.database), s(c.user), s(c.password), s(c.connectionString), b(c.ssl, false), s(c.instance),
+    b(c.encrypt, true), b(c.trustCert, true), s(c.service), s(c.filePath), s(c.hasuraAdminSecret),
+    s(c.hasuraEndpoint), s(c.createdAt), s(c.updatedAt), c.lastTestedAt ? s(c.lastTestedAt) : null,
+    c.lastTestOk === null || c.lastTestOk === undefined ? null : c.lastTestOk ? 1 : 0,
+    c.lastTestMessage ? s(c.lastTestMessage) : null,
+  ];
+}
+
+function rowToConnector(row: Record<string, unknown>): Connector {
+  const toBool = (v: unknown, d: boolean): boolean =>
+    v === 1 || v === true ? true : v === 0 || v === false ? false : d;
+  return {
+    id: String(row.id),
+    name: String(row.name ?? ''),
+    kind: row.kind === 'target' ? 'target' : 'source',
+    type: String(row.type ?? 'postgres') as ConnectorType,
+    projectRef: String(row.project_ref ?? ''),
+    region: String(row.region ?? ''),
+    host: String(row.host ?? ''),
+    port: Number(row.port ?? 0),
+    database: String(row.database ?? ''),
+    user: String(row.user ?? ''),
+    password: String(row.password ?? ''),
+    connectionString: String(row.connection_string ?? ''),
+    ssl: toBool(row.ssl, false),
+    instance: String(row.instance ?? ''),
+    encrypt: toBool(row.encrypt, true),
+    trustCert: toBool(row.trust_cert, true),
+    service: String(row.service ?? ''),
+    filePath: String(row.file_path ?? ''),
+    hasuraAdminSecret: String(row.hasura_admin_secret ?? ''),
+    hasuraEndpoint: String(row.hasura_endpoint ?? ''),
+    createdAt: String(row.created_at ?? ''),
+    updatedAt: String(row.updated_at ?? ''),
+    lastTestedAt: row.last_tested_at ? String(row.last_tested_at) : null,
+    lastTestOk:
+      row.last_test_ok === null || row.last_test_ok === undefined
+        ? null
+        : toBool(row.last_test_ok, false),
+    lastTestMessage: row.last_test_message ? String(row.last_test_message) : null,
+  };
+}
+
+/** Error for a connector write attempted while Turso is
+ *  unavailable. Reads degrade to [] instead, so pages still load. */
+function tursoRequiredError(): Error {
+  return new Error(
+    'Connectors need Turso — ' +
+      (tursoUnavailableReason() ??
+        'the database is unreachable right now. Check TURSO_DATABASE_URL / TURSO_AUTH_TOKEN in .env.local and restart the server.'),
+  );
+}
+
+function legacyFilePath(): string {
   return process.env.CONNECTORS_PATH || path.join(process.cwd(), 'data', 'connectors.json');
 }
 
-export function loadConnectors(): Connector[] {
+/** Users whose legacy import was already attempted in this process
+ *  (the meta flag below covers other processes and restarts). */
+const legacyImportAttempted = new Set<string>();
+
+/** One-time import of the old local `data/connectors.json`
+ *  (localhost checkouts created before the Turso move). Runs once
+ *  per user, the first time their connectors are listed: entries
+ *  are copied into Turso under that user, keeping their ids so
+ *  existing schedules keep pointing at the same connectors. A meta
+ *  flag records that the import ran, so a user who later deletes
+ *  all their connectors does not get them back. On a host with no
+ *  local file (e.g. Vercel) the read fails and this is a silent
+ *  no-op. */
+async function importLegacyConnectors(userId: string): Promise<void> {
+  if (!userId || legacyImportAttempted.has(userId)) return;
+  const flag = `legacy_connectors_imported:${userId}`;
+  const already = await withTurso(async (client) => {
+    const result = await client.execute({ sql: `SELECT value FROM meta WHERE key = ?`, args: [flag] });
+    return result.rows.length > 0;
+  });
+  if (already === null) return; // Turso down — retry on a later load.
+  legacyImportAttempted.add(userId);
+  if (already) return;
+  let list: unknown = null;
   try {
-    const raw = fs.readFileSync(filePath(), 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as Connector[]) : [];
+    list = JSON.parse(fs.readFileSync(legacyFilePath(), 'utf8'));
   } catch {
-    return [];
+    list = null; // No local file (serverless host) — nothing to import.
   }
+  await withTurso(async (client) => {
+    // Import first, flag last: if the loop throws midway, the flag
+    // stays unset and a later load retries (INSERT OR IGNORE skips
+    // the entries that already landed).
+    if (Array.isArray(list)) {
+      for (const raw of list as Record<string, unknown>[]) {
+        if (!raw || typeof raw.id !== 'string') continue;
+        const c = raw as unknown as Connector;
+        await client.execute({
+          sql: `INSERT OR IGNORE INTO connectors (${CONNECTOR_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: connectorArgs(userId, {
+            ...c,
+            kind: c.kind === 'target' ? 'target' : 'source',
+            createdAt: typeof c.createdAt === 'string' ? c.createdAt : new Date().toISOString(),
+            updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : new Date().toISOString(),
+            lastTestedAt: (c.lastTestedAt as string | null) ?? null,
+            lastTestOk: (c.lastTestOk as boolean | null) ?? null,
+            lastTestMessage: (c.lastTestMessage as string | null) ?? null,
+          }),
+        });
+      }
+    }
+    await client.execute({
+      sql: `INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`,
+      args: [flag, new Date().toISOString()],
+    });
+  });
 }
 
-function saveAll(list: Connector[]): void {
-  const dir = path.dirname(filePath());
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath(), JSON.stringify(list, null, 2), 'utf8');
+/** All connectors belonging to one user, oldest first. Returns []
+ *  when Turso is unavailable (degraded mode) instead of throwing,
+ *  so pages still load. */
+export async function loadConnectors(userId: string): Promise<Connector[]> {
+  if (!userId) return [];
+  await importLegacyConnectors(userId);
+  const rows = await withTurso(async (client) => {
+    const result = await client.execute({
+      sql: `SELECT ${CONNECTOR_COLS} FROM connectors WHERE user_id = ? ORDER BY created_at ASC`,
+      args: [userId],
+    });
+    return result.rows as unknown as Record<string, unknown>[];
+  });
+  return (rows ?? []).map(rowToConnector);
 }
 
-export function saveConnector(input: ConnectorInput, id?: string): Connector {
-  const list = loadConnectors();
+/** One connector, only when it belongs to this user. */
+export async function getConnector(userId: string, id: string): Promise<Connector | null> {
+  const list = await loadConnectors(userId);
+  return list.find((c) => c.id === id) ?? null;
+}
+
+export async function saveConnector(userId: string, input: ConnectorInput, id?: string): Promise<Connector> {
+  if (!userId) throw tursoRequiredError();
   const now = new Date().toISOString();
   if (id) {
-    const idx = list.findIndex((c) => c.id === id);
-    if (idx === -1) throw new Error('Connector not found');
-    const updated: Connector = { ...list[idx], ...input, id, updatedAt: now };
-    list[idx] = updated;
-    saveAll(list);
+    const existing = await getConnector(userId, id);
+    if (!existing) throw new Error('Connector not found');
+    const updated: Connector = { ...existing, ...input, id, updatedAt: now };
+    // Delete + insert keeps it simple and avoids relying on
+    // ON CONFLICT support (same pattern as saveSchedule).
+    const ran = await withTurso(async (client) => {
+      await client.execute({ sql: `DELETE FROM connectors WHERE id = ? AND user_id = ?`, args: [id, userId] });
+      await client.execute({
+        sql: `INSERT INTO connectors (${CONNECTOR_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: connectorArgs(userId, updated),
+      });
+    });
+    if (ran === null) throw tursoRequiredError();
     return updated;
   }
   const created: Connector = {
@@ -151,23 +305,30 @@ export function saveConnector(input: ConnectorInput, id?: string): Connector {
     lastTestOk: null,
     lastTestMessage: null,
   };
-  list.push(created);
-  saveAll(list);
+  const ran = await withTurso(async (client) => {
+    await client.execute({
+      sql: `INSERT INTO connectors (${CONNECTOR_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: connectorArgs(userId, created),
+    });
+  });
+  if (ran === null) throw tursoRequiredError();
   return created;
 }
 
-export function deleteConnector(id: string): void {
-  saveAll(loadConnectors().filter((c) => c.id !== id));
+export async function deleteConnector(userId: string, id: string): Promise<void> {
+  await withTurso(async (client) => {
+    await client.execute({ sql: `DELETE FROM connectors WHERE id = ? AND user_id = ?`, args: [id, userId] });
+  });
 }
 
-export function markTested(id: string, ok: boolean, message: string): void {
-  const list = loadConnectors();
-  const c = list.find((x) => x.id === id);
-  if (!c) return;
-  c.lastTestedAt = new Date().toISOString();
-  c.lastTestOk = ok;
-  c.lastTestMessage = message;
-  saveAll(list);
+export async function markTested(userId: string, id: string, ok: boolean, message: string): Promise<void> {
+  await withTurso(async (client) => {
+    await client.execute({
+      sql: `UPDATE connectors SET last_tested_at = ?, last_test_ok = ?, last_test_message = ?
+        WHERE id = ? AND user_id = ?`,
+      args: [new Date().toISOString(), ok ? 1 : 0, message, id, userId],
+    });
+  });
 }
 
 /** The stored record without the password or Hasura secret, for

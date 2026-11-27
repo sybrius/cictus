@@ -19,9 +19,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         <main className="mx-auto w-full max-w-7xl px-6 py-7 lg:px-8">{children}</main>
         <footer className="mx-auto w-full max-w-7xl px-6 pb-6 lg:px-8">
           <p className="border-t border-slate-200/70 pt-4 text-xs text-slate-400">
-            Cictus runs entirely on this machine. Connectors are stored in{' '}
-            <span className="font-mono">data/connectors.json</span> and run history in your Turso database — neither
-            is committed to git.
+            Connectors and run history live in your Turso database, scoped to your account — neither is committed
+            to git.
           </p>
         </footer>
       </div>

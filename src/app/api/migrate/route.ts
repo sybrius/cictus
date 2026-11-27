@@ -1,10 +1,11 @@
+import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { TargetConfigSchema } from '@/lib/postgres';
 import { executeMigration, resolveSourceConfig, type MigrationJob, type ProgressEvent } from '@/lib/run-migration';
 import { resolveSource, resolveTarget } from '@/lib/resolve-connector';
 import { parseSourceConfig } from '@/lib/source-dispatch';
 import { hasuraConfigForConnector } from '@/lib/hasura';
-import { requireAuth } from '@/lib/api-auth';
+import { requireUser } from '@/lib/api-auth';
 
 const BodySchema = z.object({
   // Raw form values, accepted as-is: when a connector id is given,
@@ -45,8 +46,8 @@ type OutEvent =
  * the browser stream, and sends the final summary.
  */
 export async function POST(req: Request) {
-  const auth = await requireAuth();
-  if (auth) return auth;
+  const user = await requireUser();
+  if (user instanceof NextResponse) return user;
   const body = await req.json().catch(() => null);
   const parsed = BodySchema.safeParse(body);
   if (!parsed.success) {
@@ -61,8 +62,8 @@ export async function POST(req: Request) {
   // field; the config is validated against the matching schema.
   let job: MigrationJob;
   try {
-    const s = resolveSource({ sourceConnectorId: parsed.data.sourceConnectorId, source: parsed.data.source });
-    const t = resolveTarget({ targetConnectorId: parsed.data.targetConnectorId, target: parsed.data.target });
+    const s = await resolveSource({ sourceConnectorId: parsed.data.sourceConnectorId, source: parsed.data.source }, user.id);
+    const t = await resolveTarget({ targetConnectorId: parsed.data.targetConnectorId, target: parsed.data.target }, user.id);
     const sParsed = parseSourceConfig(s.sourceType, s.config);
     const tParsed = TargetConfigSchema.safeParse({ connectionString: t.connectionString });
     if (!tParsed.success) throw new Error(tParsed.error.issues.map((i) => i.message).join('; '));

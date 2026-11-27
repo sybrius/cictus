@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { listSchedules, saveSchedule, type Schedule } from '@/lib/history-db';
 import { loadConnectors } from '@/lib/connectors';
 import { validateCron, nextRunAfter } from '@/lib/cron';
-import { requireAuth } from '@/lib/api-auth';
+import { requireUser } from '@/lib/api-auth';
 
 const ScheduleBodySchema = z.object({
   id: z.string().optional(),
@@ -22,10 +22,10 @@ const ScheduleBodySchema = z.object({
 });
 
 export async function GET() {
-  const auth = await requireAuth();
-  if (auth) return auth;
+  const user = await requireUser();
+  if (user instanceof NextResponse) return user;
   try {
-    const [schedules, connectors] = await Promise.all([listSchedules(), Promise.resolve(loadConnectors())]);
+    const [schedules, connectors] = await Promise.all([listSchedules(user.id), loadConnectors(user.id)]);
     const names = new Map(connectors.map((c) => [c.id, c.name]));
     return NextResponse.json({
       ok: true,
@@ -48,8 +48,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const auth = await requireAuth();
-  if (auth) return auth;
+  const user = await requireUser();
+  if (user instanceof NextResponse) return user;
   const body = await req.json().catch(() => null);
   const parsed = ScheduleBodySchema.safeParse(body);
   if (!parsed.success) {
@@ -63,7 +63,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: cronError }, { status: 400 });
   }
   try {
-    const connectors = loadConnectors();
+    const connectors = await loadConnectors(user.id);
     if (!connectors.some((c) => c.id === parsed.data.sourceConnectorId && c.kind === 'source')) {
       return NextResponse.json({ ok: false, error: 'Source connector not found' }, { status: 400 });
     }
@@ -72,9 +72,10 @@ export async function POST(req: Request) {
     }
     const now = new Date();
     const next = nextRunAfter(parsed.data.cron, now);
-    const existing = parsed.data.id ? (await listSchedules()).find((s) => s.id === parsed.data.id) : undefined;
+    const existing = parsed.data.id ? (await listSchedules(user.id)).find((s) => s.id === parsed.data.id) : undefined;
     const schedule: Schedule = {
       id: parsed.data.id ?? crypto.randomUUID(),
+      userId: existing?.userId || user.id,
       name: parsed.data.name,
       sourceConnectorId: parsed.data.sourceConnectorId,
       targetConnectorId: parsed.data.targetConnectorId,

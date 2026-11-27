@@ -82,7 +82,7 @@ export async function runSchedule(id: string): Promise<{ runId: string | null; e
   if (!schedule) return { runId: null, error: 'Schedule not found' };
   running.add(id);
   try {
-    const job = buildJob(schedule);
+    const job = await buildJob(schedule);
     const summary = await executeMigration(job, {
       log: () => undefined,
       phase: () => undefined,
@@ -105,9 +105,14 @@ export async function runSchedule(id: string): Promise<{ runId: string | null; e
   }
 }
 
-function buildJob(s: Schedule): MigrationJob {
-  const src = resolveSource({ sourceConnectorId: s.sourceConnectorId });
-  const tgt = resolveTarget({ targetConnectorId: s.targetConnectorId });
+async function buildJob(s: Schedule): Promise<MigrationJob> {
+  // Connectors are per-user: a scheduled run resolves them as the
+  // schedule's owner. A schedule created before per-user scoping
+  // has no owner until its first list adopts it (see listSchedules)
+  // — until then this throws 'connector not found' and the run is
+  // recorded as failed, which self-heals once the app is opened.
+  const src = await resolveSource({ sourceConnectorId: s.sourceConnectorId }, s.userId);
+  const tgt = await resolveTarget({ targetConnectorId: s.targetConnectorId }, s.userId);
   let sParsed: ReturnType<typeof parseSourceConfig>;
   try {
     sParsed = parseSourceConfig(src.sourceType, src.config);

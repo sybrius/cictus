@@ -55,6 +55,9 @@ export interface MigrationRun {
  *  enabled schedule whose next run is due. */
 export interface Schedule {
   id: string;
+  /** Owner account. '' for schedules created before per-user
+   *  scoping — the first user who lists them adopts them. */
+  userId: string;
   name: string;
   sourceConnectorId: string;
   targetConnectorId: string;
@@ -282,6 +285,7 @@ function scheduleRowToSchedule(row: Record<string, unknown>): Schedule {
   };
   return {
     id: String(row.id),
+    userId: String(row.user_id ?? ''),
     name: String(row.name ?? ''),
     sourceConnectorId: String(row.source_connector_id ?? ''),
     targetConnectorId: String(row.target_connector_id ?? ''),
@@ -301,31 +305,61 @@ function scheduleRowToSchedule(row: Record<string, unknown>): Schedule {
   };
 }
 
-const SCHEDULE_COLS = `id, name, source_connector_id, target_connector_id, tables_json, views_json,
+const SCHEDULE_COLS = `id, user_id, name, source_connector_id, target_connector_id, tables_json, views_json,
   include_data, drop_existing, use_copy, track_in_hasura, cron, enabled, last_run_at, last_status, last_run_id,
   next_run_at, created_at`;
 
-export async function listSchedules(): Promise<Schedule[]> {
+/** Schedules for one user. Without a userId (the background
+ *  scheduler) returns every schedule. When a userId is given,
+ *  schedules created before per-user scoping (user_id NULL) are
+ *  adopted by that user on first sight, so pre-existing schedules
+ *  keep working after the connectors move to Turso. */
+export async function listSchedules(userId?: string): Promise<Schedule[]> {
   const rows = await withTurso(async (client) => {
+    if (userId) {
+      await client.execute({
+        sql: `UPDATE schedules SET user_id = ? WHERE user_id IS NULL OR user_id = ''`,
+        args: [userId],
+      });
+      const result = await client.execute({
+        sql: `SELECT ${SCHEDULE_COLS} FROM schedules WHERE user_id = ? ORDER BY created_at DESC`,
+        args: [userId],
+      });
+      return (result.rows as unknown as Record<string, unknown>[]).map(scheduleRowToSchedule);
+    }
     const result = await client.execute(`SELECT ${SCHEDULE_COLS} FROM schedules ORDER BY created_at DESC`);
     return (result.rows as unknown as Record<string, unknown>[]).map(scheduleRowToSchedule);
   });
   if (rows !== null) return rows;
   // Degraded mode: schedules created while Turso is unavailable live
   // only in memory, until the server restarts.
-  return [...getMemorySchedules().values()].sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
+  return [...getMemorySchedules().values()]
+    .filter((s) => !userId || !s.userId || s.userId === userId)
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 }
 
-export async function getSchedule(id: string): Promise<Schedule | null> {
+export async function getSchedule(id: string, userId?: string): Promise<Schedule | null> {
   const found = await withTurso(async (client) => {
+    if (userId) {
+      await client.execute({
+        sql: `UPDATE schedules SET user_id = ? WHERE id = ? AND (user_id IS NULL OR user_id = '')`,
+        args: [userId, id],
+      });
+    }
     const result = await client.execute({
       sql: `SELECT ${SCHEDULE_COLS} FROM schedules WHERE id = ?`,
       args: [id],
     });
     const row = result.rows[0] as unknown as Record<string, unknown> | undefined;
-    return row ? scheduleRowToSchedule(row) : null;
+    if (!row) return null;
+    const s = scheduleRowToSchedule(row);
+    if (userId && s.userId && s.userId !== userId) return null;
+    return s;
   });
-  return found ?? getMemorySchedules().get(id) ?? null;
+  if (found !== null) return found;
+  const mem = getMemorySchedules().get(id);
+  if (mem && (!userId || !mem.userId || mem.userId === userId)) return mem;
+  return null;
 }
 
 /** Insert or replace a schedule (delete + insert keeps it simple and
@@ -335,12 +369,13 @@ export async function saveSchedule(s: Schedule): Promise<void> {
     await client.execute({ sql: `DELETE FROM schedules WHERE id = ?`, args: [s.id] });
     await client.execute({
       sql: `INSERT INTO schedules
-        (id, name, source_connector_id, target_connector_id, tables_json, views_json,
+        (id, user_id, name, source_connector_id, target_connector_id, tables_json, views_json,
          include_data, drop_existing, use_copy, track_in_hasura, cron, enabled,
          last_run_at, last_status, last_run_id, next_run_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         s.id,
+        s.userId ?? '',
         s.name,
         s.sourceConnectorId,
         s.targetConnectorId,
@@ -363,11 +398,22 @@ export async function saveSchedule(s: Schedule): Promise<void> {
   if (ran === null) getMemorySchedules().set(s.id, s);
 }
 
-export async function deleteSchedule(id: string): Promise<void> {
+export async function deleteSchedule(id: string, userId?: string): Promise<void> {
   const ran = await withTurso(async (client) => {
-    await client.execute({ sql: `DELETE FROM schedules WHERE id = ?`, args: [id] });
+    if (userId) {
+      await client.execute({
+        sql: `DELETE FROM schedules WHERE id = ? AND (user_id = ? OR user_id IS NULL OR user_id = '')`,
+        args: [id, userId],
+      });
+    } else {
+      await client.execute({ sql: `DELETE FROM schedules WHERE id = ?`, args: [id] });
+    }
   });
-  if (ran === null) getMemorySchedules().delete(id);
+  if (ran === null) {
+    const mem = getMemorySchedules();
+    const s = mem.get(id);
+    if (s && (!userId || !s.userId || s.userId === userId)) mem.delete(id);
+  }
 }
 
 export async function updateScheduleRun(id: string, patch: {

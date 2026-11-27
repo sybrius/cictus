@@ -5,15 +5,20 @@ import type { SourceKind } from '@/lib/type-map';
 
 /**
  * Resolve a connection from either a saved connector id or a form
- * payload. Connectors keep their password on the server (in
- * data/connectors.json) — the browser only ever sends the connector
- * id, never the password. This is what lets the wizard use a saved
- * NHost / Supabase / Postgres / SQL Server / MySQL / Oracle / SQLite
- * connector without re-typing credentials.
+ * payload. Connectors keep their password on the server (in Turso,
+ * scoped to the signed-in user) — the browser only ever sends the
+ * connector id, never the password. This is what lets the wizard use
+ * a saved NHost / Supabase / Postgres / SQL Server / MySQL / Oracle /
+ * SQLite connector without re-typing credentials.
  *
  * The source type comes from the connector when one is used, or from
  * the form's `sourceType` field otherwise (defaulting to sqlserver
  * for older payloads).
+ *
+ * `userId` scopes the lookup to the signed-in user's connectors; a
+ * connector id belonging to another user resolves as "not found".
+ * The scheduler passes the schedule owner's id; an empty userId
+ * only ever matches form payloads, never a saved connector.
  */
 
 function sourceTypeFromConnector(c: Connector): SourceKind {
@@ -31,10 +36,10 @@ function sourceTypeFromValue(v: unknown): SourceKind {
   return 'sqlserver';
 }
 
-export function resolveSource(body: Record<string, unknown>): { config: SourceFormValues; connectorName: string | null; sourceType: SourceKind } {
+export async function resolveSource(body: Record<string, unknown>, userId = ''): Promise<{ config: SourceFormValues; connectorName: string | null; sourceType: SourceKind }> {
   const id = typeof body.sourceConnectorId === 'string' ? body.sourceConnectorId : '';
   if (id) {
-    const c = loadConnectors().find((x) => x.id === id && x.kind === 'source');
+    const c = (await loadConnectors(userId)).find((x) => x.id === id && x.kind === 'source');
     if (!c) throw new Error('Source connector not found');
     return {
       config: sourceFormValues(c),
@@ -49,10 +54,10 @@ export function resolveSource(body: Record<string, unknown>): { config: SourceFo
   return { config: src, connectorName: null, sourceType };
 }
 
-export function resolveTarget(body: Record<string, unknown>): { connectionString: string; connectorName: string | null; connectorType: string | null; connector: Connector | null } {
+export async function resolveTarget(body: Record<string, unknown>, userId = ''): Promise<{ connectionString: string; connectorName: string | null; connectorType: string | null; connector: Connector | null }> {
   const id = typeof body.targetConnectorId === 'string' ? body.targetConnectorId : '';
   if (id) {
-    const c = loadConnectors().find((x) => x.id === id && x.kind === 'target');
+    const c = (await loadConnectors(userId)).find((x) => x.id === id && x.kind === 'target');
     if (!c) throw new Error('Target connector not found');
     return { connectionString: targetConnectionString(c), connectorName: c.name, connectorType: c.type, connector: c };
   }

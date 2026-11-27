@@ -145,6 +145,7 @@ async function ensureTursoSchema(client: Client): Promise<void> {
     created_at TEXT
   )`);
   await ensureColumn(client, 'schedules', 'track_in_hasura', 'INTEGER');
+  await ensureColumn(client, 'schedules', 'user_id', 'TEXT');
   await client.execute(`CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -156,6 +157,49 @@ async function ensureTursoSchema(client: Client): Promise<void> {
     user_id TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL
+  )`);
+  // Saved connectors, one row per connector per user. This is what
+  // makes connectors work on a serverless host (Vercel): the old
+  // local `data/connectors.json` file cannot be written there
+  // (read-only filesystem — `mkdir /var/task/data` fails with
+  // ENOENT), so connectors live in Turso, scoped by user_id.
+  // Passwords and Hasura secrets are stored here as given — the
+  // Turso database belongs to the user, and the values are never
+  // sent to the browser (see publicConnector()).
+  await client.execute(`CREATE TABLE IF NOT EXISTS connectors (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT,
+    kind TEXT,
+    type TEXT,
+    project_ref TEXT,
+    region TEXT,
+    host TEXT,
+    port INTEGER,
+    database TEXT,
+    user TEXT,
+    password TEXT,
+    connection_string TEXT,
+    ssl INTEGER,
+    instance TEXT,
+    encrypt INTEGER,
+    trust_cert INTEGER,
+    service TEXT,
+    file_path TEXT,
+    hasura_admin_secret TEXT,
+    hasura_endpoint TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    last_tested_at TEXT,
+    last_test_ok INTEGER,
+    last_test_message TEXT
+  )`);
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_connectors_user ON connectors(user_id)`);
+  // Tiny key/value store for one-time flags (e.g. whether the legacy
+  // data/connectors.json import has run for a user).
+  await client.execute(`CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
   )`);
 }
 

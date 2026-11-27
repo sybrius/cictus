@@ -554,8 +554,8 @@ export default function MigratePage() {
       </div>
       <p className="flex items-start gap-1.5 text-xs leading-relaxed text-slate-400">
         <Layers className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        Credentials are only sent with the request that needs them. Saved connectors keep their password on this machine only
-        (data/connectors.json, never committed). Review the generated SQL before running it against production; view
+        Credentials are only sent with the request that needs them. Saved connectors keep their password in your Turso
+        database, visible only to your account. Review the generated SQL before running it against production; view
         conversion is best-effort {effectiveSourceType === 'mysql' ? 'MySQL' : 'T-SQL'} → Postgres.
       </p>
     </div>
