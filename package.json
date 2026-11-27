@@ -3,7 +3,7 @@
     "@libsql/client": "^0.18.0",
     "bcryptjs": "^3.0.3",
     "lucide-react": "^1.77.0",
-    "mssql": "^10.0.3",
+    "mssql": "^12.8.1",
     "mysql2": "^3.24.6",
     "next": "^14.2.5",
     "oracledb": "^26.0.0",
@@ -17,7 +17,7 @@
   "description": "Migrate SQL Server and MySQL tables, schema, data and views to Postgres (NHost, Supabase, or any PostgreSQL)",
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
-    "@types/mssql": "^9.1.5",
+    "@types/mssql": "^12.3.0",
     "@types/node": "^20.14.12",
     "@types/oracledb": "^26.0.1",
     "@types/pg": "^8.11.6",
