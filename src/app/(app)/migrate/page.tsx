@@ -7,11 +7,9 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
-  Database,
   Download,
   Eye,
   FileDown,
-  HardDrive,
   Layers,
   Play,
   Rows3,
@@ -20,17 +18,17 @@ import {
 } from 'lucide-react';
 import type { DatabaseSchema } from '@/lib/sqlserver';
 import { SourceConnectionForm, TargetConnectionForm, type SourceFormValues, type TargetFormValues } from '@/components/ConnectionForm';
+import { ConnectionTabs, ConnectorList, SaveConnectorBox, type ConnectionMode, type PickerConnector } from '@/components/ConnectionPicker';
 import type { SourceKind } from '@/lib/type-map';
 import { SchemaTree } from '@/components/SchemaTree';
 import { TypeMappingTable } from '@/components/TypeMappingTable';
 import { MigrationLog, type LogLine } from '@/components/MigrationLog';
 import { ProgressBar } from '@/components/ProgressBar';
-import { Alert, Badge, Button, Card, CardHeader, PageHeader, inputCls } from '@/components/ui';
+import { Alert, Badge, Button, Card, CardHeader, PageHeader } from '@/components/ui';
 
 const STEPS = ['Connect source', 'Connect target', 'Discover & Select', 'Type Mapping', 'Migrate', 'Validate & Report'];
 
 interface ValidationRow { table: string; source: number; target: number; match: boolean }
-interface ConnectorSummary { id: string; name: string; type: string; kind: string; host: string; database: string; projectRef: string; region: string; hasuraEndpoint: string; hasHasuraSecret: boolean; lastTestOk: boolean | null }
 
 const TARGET_HINTS: Record<string, string> = {
   nhost: 'After migration, track the new tables in the Hasura console (NHost Dashboard → Hasura → Data) so they appear in your GraphQL API. Tables without a primary key cannot be tracked until one is added.',
@@ -39,8 +37,8 @@ const TARGET_HINTS: Record<string, string> = {
 };
 
 const STEP_DESCRIPTIONS = [
-  'Pick a saved source connector, or connect to SQL Server / MySQL manually.',
-  'Pick a saved target connector, or paste a Postgres connection string.',
+  'Use an existing saved source, or enter a new connection.',
+  'Use an existing saved destination, or paste a new Postgres connection string.',
   'Discover the source schema and choose the tables and views to migrate.',
   'Review the source → Postgres type map and edit any type inline.',
   'Create tables, copy data, add foreign keys, create views.',
@@ -53,9 +51,15 @@ export default function MigratePage() {
     host: 'localhost', port: 1433, user: 'sa', password: '', database: '', trustCert: true, encrypt: true, instance: '', ssl: false, connectionString: '', service: '', filePath: '', sourceType: 'sqlserver',
   });
   const [target, setTarget] = useState<TargetFormValues>({ connectionString: '' });
-  const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
+  const [connectors, setConnectors] = useState<PickerConnector[]>([]);
   const [sourceConnectorId, setSourceConnectorId] = useState('');
   const [targetConnectorId, setTargetConnectorId] = useState('');
+  /** Existing vs New is a visible choice now (tabs), not a dropdown
+   *  option hiding under a "Saved connector" label. */
+  const [sourceMode, setSourceMode] = useState<ConnectionMode>('existing');
+  const [targetMode, setTargetMode] = useState<ConnectionMode>('existing');
+  /** Type picked when saving a manually-entered target as a connector. */
+  const [targetSaveType, setTargetSaveType] = useState('postgres');
   const [sourceOk, setSourceOk] = useState(false);
   const [targetOk, setTargetOk] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -83,9 +87,61 @@ export default function MigratePage() {
   const [script, setScript] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  async function refreshConnectors() {
+    try {
+      const j = await (await fetch('/api/connectors')).json();
+      setConnectors(j.connectors ?? []);
+    } catch {
+      /* keep the previous list */
+    }
+  }
+
   useEffect(() => {
-    fetch('/api/connectors').then((r) => r.json()).then((j) => setConnectors(j.connectors ?? [])).catch(() => undefined);
+    void refreshConnectors();
   }, []);
+
+  /** Save a manually-tested source connection as a connector, then
+   *  switch to the Existing tab with it selected. */
+  async function saveSourceConnector(name: string) {
+    const type =
+      source.sourceType === 'mysql' ? 'mysql'
+      : source.sourceType === 'postgres' ? 'postgres-source'
+      : source.sourceType === 'oracle' ? 'oracle'
+      : source.sourceType === 'sqlite' ? 'sqlite'
+      : 'sqlserver';
+    const r = await fetch('/api/connectors', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, type, host: source.host, port: source.port, user: source.user, password: source.password,
+        database: source.database, instance: source.instance, ssl: source.ssl,
+        encrypt: source.encrypt, trustCert: source.trustCert, service: source.service,
+        filePath: source.filePath, connectionString: source.connectionString,
+      }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error ?? 'Could not save the connector');
+    await refreshConnectors();
+    setSourceConnectorId(j.connector.id);
+    setSourceMode('existing');
+    setSourceResult({ ok: true, message: `Saved as “${name}” — selected under Existing source.` });
+  }
+
+  /** Save a manually-tested target connection string as a connector.
+   *  The type comes from the picker's NHost / Supabase / PostgreSQL
+   *  choice: it decides how the string is shown and whether Hasura
+   *  auto-track is offered. */
+  async function saveTargetConnector(name: string, type?: string) {
+    const r = await fetch('/api/connectors', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, type: type ?? 'postgres', connectionString: target.connectionString }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error ?? 'Could not save the connector');
+    await refreshConnectors();
+    setTargetConnectorId(j.connector.id);
+    setTargetMode('existing');
+    setTargetResult({ ok: true, message: `Saved as “${name}” — selected under Existing destination.` });
+  }
 
   const sourceConnectors = connectors.filter((c) => c.kind === 'source');
   const targetConnectors = connectors.filter((c) => c.kind === 'target');
@@ -319,64 +375,90 @@ export default function MigratePage() {
           <div className="p-5 sm:p-6">
             {step === 0 && (
               <div className="space-y-4">
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold tracking-wide text-slate-600">Saved source connector</label>
-                  <select className={inputCls} value={sourceConnectorId} onChange={(e) => { setSourceConnectorId(e.target.value); setSourceOk(false); setSourceResult(null); }}>
-                    <option value="">Manual connection (enter below)</option>
-                    {sourceConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {c.host}/{c.database}</option>)}
-                  </select>
-                  <p className="mt-1.5 text-xs text-slate-500">No source connector yet? <Link href="/connectors" className="font-medium text-brand-600 hover:text-brand-700">Add one in Connectors</Link> — its password stays on this machine and is never shown in the browser.</p>
-                </div>
-                {sourceConnectorId && selectedSourceConnector ? (
+                <ConnectionTabs
+                  mode={sourceMode}
+                  onModeChange={(m) => {
+                    setSourceMode(m);
+                    if (m === 'new') { setSourceConnectorId(''); setSourceOk(false); setSourceResult(null); }
+                  }}
+                  existingLabel="Existing source"
+                  newLabel="New source"
+                />
+                {sourceMode === 'existing' ? (
                   <div className="space-y-3">
-                    <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-ink-50 px-4 py-3">
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-600">
-                        {selectedSourceConnector.type === 'mysql' ? <Database className="h-5 w-5" /> : <HardDrive className="h-5 w-5" />}
-                      </span>
-                      <div className="min-w-0 text-sm">
-                        <span className="block truncate font-semibold text-slate-900">{selectedSourceConnector.name}</span>
-                        <span className="text-slate-500">{selectedSourceConnector.type === 'mysql' ? 'MySQL' : 'SQL Server'} · {selectedSourceConnector.host}/{selectedSourceConnector.database}</span>
+                    <ConnectorList
+                      kind="source"
+                      connectors={sourceConnectors}
+                      selectedId={sourceConnectorId}
+                      onSelect={(id) => { setSourceConnectorId(id); setSourceOk(false); setSourceResult(null); }}
+                    />
+                    {selectedSourceConnector && (
+                      <div className="space-y-3">
+                        <Button onClick={() => testSource()} loading={testing}>{testing ? 'Testing…' : 'Test connection'}</Button>
+                        {sourceResult && <p className={`text-sm font-medium ${sourceResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{sourceResult.message}</p>}
                       </div>
-                      {selectedSourceConnector.lastTestOk === true && <Badge tone="green" className="ml-auto shrink-0">Last test passed</Badge>}
-                    </div>
-                    <Button onClick={() => testSource()} loading={testing}>{testing ? 'Testing…' : 'Test connection'}</Button>
-                    {sourceResult && <p className={`text-sm font-medium ${sourceResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{sourceResult.message}</p>}
+                    )}
                   </div>
                 ) : (
-                  <SourceConnectionForm initial={source} onTest={(v) => { setSource(v); testSource(v); }} onDiagnose={diagnoseSource} testing={testing} diagnosing={diagnosing} testResult={sourceResult} diagnoseResult={diagnoseResult} />
+                  <div className="space-y-4">
+                    <SourceConnectionForm initial={source} onTest={(v) => { setSource(v); testSource(v); }} onDiagnose={diagnoseSource} testing={testing} diagnosing={diagnosing} testResult={sourceResult} diagnoseResult={diagnoseResult} />
+                    {sourceOk && (
+                      <SaveConnectorBox
+                        key={`src-${source.sourceType}-${source.host}-${source.database}`}
+                        defaultName={source.host ? `${sourceTypeLabel} — ${source.host}` : sourceTypeLabel}
+                        onSave={saveSourceConnector}
+                      />
+                    )}
+                  </div>
                 )}
               </div>
             )}
             {step === 1 && (
               <div className="space-y-4">
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold tracking-wide text-slate-600">Saved target connector</label>
-                  <select className={inputCls} value={targetConnectorId} onChange={(e) => { setTargetConnectorId(e.target.value); setTargetOk(false); setTargetResult(null); }}>
-                    <option value="">Manual connection (paste connection string below)</option>
-                    {targetConnectors.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.type}{c.projectRef ? ` · ${c.projectRef}` : ''}{c.host ? ` · ${c.host}` : ''}</option>)}
-                  </select>
-                  <p className="mt-1.5 text-xs text-slate-500">No target connector yet? <Link href="/connectors" className="font-medium text-brand-600 hover:text-brand-700">Add an NHost, Supabase or PostgreSQL connector</Link>.</p>
-                </div>
-                {targetConnectorId && selectedTargetConnector ? (
+                <ConnectionTabs
+                  mode={targetMode}
+                  onModeChange={(m) => {
+                    setTargetMode(m);
+                    if (m === 'new') { setTargetConnectorId(''); setTargetOk(false); setTargetResult(null); }
+                  }}
+                  existingLabel="Existing destination"
+                  newLabel="New destination"
+                />
+                {targetMode === 'existing' ? (
                   <div className="space-y-3">
-                    <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-ink-50 px-4 py-3">
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-600">
-                        <Database className="h-5 w-5" />
-                      </span>
-                      <div className="min-w-0 text-sm">
-                        <span className="block truncate font-semibold text-slate-900">{selectedTargetConnector.name}</span>
-                        <span className="text-slate-500">
-                          {selectedTargetConnector.type}
-                          {selectedTargetConnector.projectRef ? ` · ${selectedTargetConnector.projectRef}` : ''}
-                          {selectedTargetConnector.host ? ` · ${selectedTargetConnector.host}` : ''}
-                        </span>
+                    <ConnectorList
+                      kind="target"
+                      connectors={targetConnectors}
+                      selectedId={targetConnectorId}
+                      onSelect={(id) => { setTargetConnectorId(id); setTargetOk(false); setTargetResult(null); }}
+                    />
+                    {selectedTargetConnector && (
+                      <div className="space-y-3">
+                        <Button onClick={() => testTarget()} loading={testing}>{testing ? 'Testing…' : 'Test connection'}</Button>
+                        {targetResult && <p className={`text-sm font-medium ${targetResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{targetResult.message}</p>}
                       </div>
-                    </div>
-                    <Button onClick={() => testTarget()} loading={testing}>{testing ? 'Testing…' : 'Test connection'}</Button>
-                    {targetResult && <p className={`text-sm font-medium ${targetResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>{targetResult.message}</p>}
+                    )}
                   </div>
                 ) : (
-                  <TargetConnectionForm initial={target} onTest={(v) => { setTarget(v); testTarget(v); }} testing={testing} testResult={targetResult} />
+                  <div className="space-y-4">
+                    <TargetConnectionForm initial={target} onTest={(v) => { setTarget(v); testTarget(v); }} testing={testing} testResult={targetResult} />
+                    {targetOk && (
+                      <SaveConnectorBox
+                        key={`tgt-${target.connectionString.match(/@([^:/]+)/)?.[1] ?? 'target'}`}
+                        defaultName="Postgres target"
+                        onSave={saveTargetConnector}
+                        typePicker={{
+                          options: [
+                            { value: 'nhost', label: 'NHost' },
+                            { value: 'supabase', label: 'Supabase' },
+                            { value: 'postgres', label: 'PostgreSQL' },
+                          ],
+                          value: targetSaveType,
+                          onChange: setTargetSaveType,
+                        }}
+                      />
+                    )}
+                  </div>
                 )}
                 <p className="rounded-xl bg-ink-50 px-4 py-3 text-xs leading-relaxed text-slate-500">{TARGET_HINTS[selectedTargetConnector?.type ?? 'postgres']}</p>
               </div>

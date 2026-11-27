@@ -8,6 +8,7 @@ import {
   CalendarClock,
   ChevronsLeft,
   ChevronsRight,
+  DatabaseBackup,
   DatabaseZap,
   History,
   LayoutDashboard,
@@ -25,6 +26,7 @@ const SECTIONS = [
     label: 'Migrate',
     items: [
       { href: '/migrate', label: 'New migration', icon: ArrowRightLeft },
+      { href: '/restore', label: 'Restore backup', icon: DatabaseBackup },
       { href: '/history', label: 'Run history', icon: History },
       { href: '/schedules', label: 'Schedules', icon: CalendarClock },
     ],

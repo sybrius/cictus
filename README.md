@@ -83,6 +83,15 @@ per-table validation, and a full run history.
   up, so run it on localhost — see [Sign in](#sign-in).
 - **Downloadable SQL** — generate the full migration script as a `.sql`
   file and review or run it yourself, without executing anything.
+- **Restore backup** — upload a pg_dump plain-text dump (`.sql`, or
+  `.sql.gz`) and restore it into an NHost, Supabase or generic
+  Postgres target. The dump is parsed first so you can review what it
+  contains (tables, COPY/INSERT rows, warnings about DROP, extensions
+  and owners) before anything runs; statements then execute one at a
+  time with live progress, and a failed statement is reported and
+  skipped unless Stop on first error is set. The run is recorded in
+  History as "Restore &lt;file&gt;". See [Restore a backup
+  dump](#restore-a-backup-dump).
 
 ## Supported sources & targets
 
@@ -162,21 +171,31 @@ No source/target database server is needed to run the app itself.
    account (email + password); afterwards every page needs a login.
    See [Sign in](#sign-in).
 2. **Connectors (optional)** — save a SQL Server or MySQL source and an
-   NHost / Supabase / PostgreSQL target once, then pick them in the
-   wizard instead of re-typing credentials.
+   NHost / Supabase / PostgreSQL target once, then pick them under
+   **Existing source / Existing destination** in the wizard instead of
+   re-typing credentials.
 3. **New migration** — the wizard walks through source → target →
    discover & select → type mapping → migrate → validate.
-4. **History** — every run, with per-table row counts and errors.
-5. **Dashboard** — totals across runs, recent migrations, connector status.
+4. **Restore backup** — upload a pg_dump `.sql` dump and restore it
+   into a Postgres target; see [Restore a backup
+   dump](#restore-a-backup-dump).
+5. **History** — every run, with per-table row counts and errors.
+6. **Dashboard** — totals across runs, recent migrations, connector status.
 
 ### The wizard in detail
 
-1. **Connect source** — pick a saved SQL Server / MySQL connector or
-   connect manually. **Test connection** verifies the login;
-   **Diagnose (DNS + port)** tells you whether a failure is DNS, TCP,
-   or login/TLS, without logging in.
-2. **Connect target** — pick a saved NHost / Supabase / PostgreSQL
-   connector or paste a connection string manually.
+1. **Connect source** — **Existing source** lists your saved source
+   connectors (pick one and test it); **New source** is the manual
+   form (SQL Server / MySQL / PostgreSQL / Oracle / SQLite). After a
+   manual connection tests OK, you can save it as a connector from
+   the same step, so it appears under Existing next time.
+   **Test connection** verifies the login; **Diagnose (DNS + port)**
+   tells you whether a failure is DNS, TCP, or login/TLS, without
+   logging in.
+2. **Connect target** — **Existing destination** lists your saved
+   NHost / Supabase / PostgreSQL connectors; **New destination** is
+   the manual connection-string form (pick the type — NHost,
+   Supabase or PostgreSQL — when saving it as a connector).
 3. **Discover & Select** — introspects the source; pick tables and views,
    with row counts and no-PK flags (tables without a primary key cannot
    be tracked in Hasura until one is added).
@@ -302,6 +321,51 @@ Identifiers keep their exact case: Postgres folds unquoted names to
 lowercase, but the tables and columns are created quoted (`"CallLog"`,
 `"WorkerId"`), so view references are quoted with the exact
 table/column names from the introspected schema.
+
+## Restore a backup dump
+
+The **Restore backup** page restores a `pg_dump` plain-text dump into
+an NHost, Supabase or generic Postgres target — for example, bringing
+a backup back after a bad restore, or seeding a fresh database from a
+dump taken elsewhere.
+
+1. **Target** — pick an **Existing destination** connector, or paste a
+   **New destination** connection string (same picker as the wizard).
+   Test it first.
+2. **Upload dump** — choose a `.sql` file, or a `.sql.gz` (decompressed
+   on the server). Make a plain-text dump with
+   `pg_dump -F p dbname > backup.sql`.
+3. **Review** — the dump is parsed, not executed: statement count,
+   tables / views / sequences to create, COPY and INSERT row counts,
+   and warnings. The parser understands string literals (including
+   `''` and `E'...'` escapes), dollar-quoted function bodies,
+   comments, and `COPY ... FROM stdin` data blocks, so a semicolon
+   inside data never splits a statement.
+4. **Restore** — statements run one at a time, each in its own
+   implicit transaction, with live progress. A failed statement is
+   reported and the run moves on (dumps routinely contain a few the
+   target rejects — extensions, owners, already-existing objects),
+   unless **Stop on first error** is set. The run is recorded in
+   History as "Restore &lt;file&gt;", and the uploaded file is deleted
+   from the server when the run finishes.
+
+Limits, stated plainly:
+
+- **Plain-text dumps only.** Custom-format dumps (`.dump` / `.backup`)
+  need the `pg_restore` binary, which this runtime does not have —
+  re-dump in plain format (`-F p`).
+- **Upload size on Vercel.** The platform limits request bodies to
+  about 4.5 MB, so large dumps should be restored from a local run
+  of the app (the server itself accepts up to 200 MB).
+- **The upload is temporary.** It lives in the OS temp dir between
+  the parse and run steps; on serverless hosts it may not survive
+  between requests — if the run says the upload expired, upload it
+  again.
+- **Only restore dumps you trust.** The file runs as SQL against the
+  target and can drop or overwrite existing objects.
+- **No live Postgres here?** `npm test` runs the restore engine
+  against pg-mem (an in-memory Postgres) plus a fake client for COPY
+  — see `tests/restore.test.ts`.
 
 ## Sign in
 
@@ -483,6 +547,11 @@ What the tool does not do, so you can plan around it:
   `TURSO_AUTH_TOKEN` in `.env.local`, runs are not recorded and
   schedules only live in memory until the server restarts — the
   Dashboard and History pages show a notice instead of data.
+- **Restore takes plain-text dumps only.** Custom-format dumps
+  (`.dump` / `.backup`) need the `pg_restore` binary, which this
+  runtime does not have. On the Vercel deployment, uploads are
+  limited by the platform to about 4.5 MB — restore larger dumps
+  from a local run of the app.
 - **Simple built-in auth, not a full identity system.** Email +
   password sign-in with bcrypt hashes and 7-day sessions (see
   [Sign in](#sign-in)). There is no email verification, password
@@ -605,6 +674,8 @@ run while the server is running.
 | `POST /api/target/test` | Test the Postgres connection (+ PostGIS check). |
 | `POST /api/migrate` | Run the migration; streams progress as SSE (`text/event-stream`). |
 | `POST /api/migrate/ddl` | Return the generated SQL script (no execution). |
+| `POST /api/restore/parse` | Parse an uploaded pg_dump `.sql` / `.sql.gz` and return the review preview. |
+| `POST /api/restore/run` | Restore a parsed dump into the target; streams progress as SSE. |
 | `GET /api/connectors` · `POST /api/connectors` · `DELETE /api/connectors` | Saved connectors (passwords never leave the server). |
 | `POST /api/connectors/test` | Test a saved connector. |
 | `GET /api/history` · `GET /api/history/[id]` | Migration run history from the Turso store. |
@@ -619,6 +690,7 @@ src/
       layout.tsx                Signed-in shell (sidebar + topbar)
       page.tsx                  Dashboard
       migrate/page.tsx          6-step wizard
+      restore/page.tsx          Restore a pg_dump backup
       connectors/page.tsx       Saved connectors
       history/page.tsx          Run history
       schedules/page.tsx        Scheduled migrations
@@ -632,6 +704,8 @@ src/
     api/target/test/route.ts
     api/migrate/route.ts        SSE streaming migration
     api/migrate/ddl/route.ts    SQL script download
+    api/restore/parse/route.ts  Parse an uploaded dump
+    api/restore/run/route.ts    SSE streaming restore
     api/connectors/route.ts     Connector CRUD
     api/connectors/test/route.ts
     api/hasura/test/route.ts    Hasura connection test
@@ -647,6 +721,7 @@ src/
     Topbar.tsx          Breadcrumbs + status
     BrandIcons.tsx      Provider brand marks
     ConnectionForm.tsx  Source/target connection forms
+    ConnectionPicker.tsx Existing / New tabs, connector list, save-as-connector
     SchemaTree.tsx      Table/view picker with row counts
     TypeMappingTable.tsx Editable type map
     MigrationLog.tsx    Auto-scrolling log
@@ -664,6 +739,7 @@ src/
     ddl.ts              DDL generation + view conversion (all dialects)
     migrate-data.ts     Batched + COPY bulk load, identity-sequence fix
     run-migration.ts    Shared migration engine (manual + scheduled)
+    restore.ts          pg_dump splitter, summarizer, restore engine
     source-dispatch.ts  Dispatch on source type
     connectors.ts       Saved connectors (Turso, per user)
     resolve-connector.ts Resolve connector id / form payload + source type
@@ -673,6 +749,8 @@ src/
     scheduler.ts        Schedule ticking + background runs
     cron.ts             5-field cron parsing + next-run calculation
     hasura.ts           Hasura Metadata API (pg_track_table)
+tests/
+  restore.test.ts       Restore engine tests (`npm test`)
 ```
 
 ## Contributing
@@ -719,6 +797,8 @@ Done so far:
 - [x] Turso history, schedules & accounts (replacing local DuckDB)
 - [x] Simple sign-up / login (bcrypt, sessions)
 - [x] Saved connectors in Turso, per user (replacing local data/connectors.json)
+- [x] Restore a pg_dump backup (`.sql` / `.sql.gz`) into a Postgres target
+- [x] Existing / New connection picker in the wizard (with save-as-connector)
 
 Next:
 
