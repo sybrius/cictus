@@ -3,12 +3,17 @@ import {
   loadConnectors, saveConnector, deleteConnector, publicConnector,
   CONNECTOR_TYPES, type ConnectorInput,
 } from '@/lib/connectors';
+import { requireAuth } from '@/lib/api-auth';
 
 export async function GET() {
+  const auth = await requireAuth();
+  if (auth) return auth;
   return NextResponse.json({ ok: true, connectors: loadConnectors().map(publicConnector) });
 }
 
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== 'object') {
     return NextResponse.json({ ok: false, error: 'Invalid body' }, { status: 400 });
@@ -64,6 +69,8 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const id = new URL(req.url).searchParams.get('id');
   if (!id) return NextResponse.json({ ok: false, error: 'id is required' }, { status: 400 });
   deleteConnector(id);

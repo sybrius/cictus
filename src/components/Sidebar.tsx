@@ -11,6 +11,7 @@ import {
   DatabaseZap,
   History,
   LayoutDashboard,
+  LogOut,
   PlugZap,
   Workflow,
 } from 'lucide-react';
@@ -37,6 +38,7 @@ const SECTIONS = [
 export function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [email, setEmail] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -45,6 +47,23 @@ export function Sidebar() {
       /* storage unavailable — keep expanded */
     }
   }, []);
+
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (j?.user?.email) setEmail(j.user.email);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  async function signOut() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      window.location.href = '/login';
+    }
+  }
 
   const toggle = () => {
     setCollapsed((c) => {
@@ -132,12 +151,35 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* Footer */}
-      {!collapsed && (
+      {/* Account + footer */}
+      {!collapsed ? (
         <div className="border-t border-slate-100 px-5 py-3">
-          <p className="break-words text-[11px] leading-relaxed text-slate-400">
-            Local-first · history in DuckDB · connectors never leave this machine
+          {email && (
+            <p className="mb-2 truncate text-xs font-medium text-slate-600" title={email}>
+              {email}
+            </p>
+          )}
+          <button
+            onClick={signOut}
+            className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out
+          </button>
+          <p className="mt-2 break-words text-[11px] leading-relaxed text-slate-400">
+            Turso history · connectors never leave this machine
           </p>
+        </div>
+      ) : (
+        <div className="flex justify-center border-t border-slate-100 py-3">
+          <button
+            onClick={signOut}
+            title="Sign out"
+            aria-label="Sign out"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          >
+            <LogOut className="h-[18px] w-[18px]" />
+          </button>
         </div>
       )}
     </aside>

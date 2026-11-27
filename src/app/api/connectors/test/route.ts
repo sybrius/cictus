@@ -5,9 +5,12 @@ import {
 import { testTargetConnection } from '@/lib/postgres';
 import { testSourceConnection } from '@/lib/source-dispatch';
 import type { SourceKind } from '@/lib/type-map';
+import { requireAuth } from '@/lib/api-auth';
 
 /** POST { id } — test a saved connector with the password stored on this machine. */
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   const id = body?.id ? String(body.id) : '';
   const c = loadConnectors().find((x) => x.id === id);

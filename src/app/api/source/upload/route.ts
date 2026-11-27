@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { uploadsDir } from '@/lib/sqlite';
+import { requireAuth } from '@/lib/api-auth';
 
 /**
  * POST a SQLite file (multipart form, field `file`) — stores it under
@@ -13,6 +14,8 @@ import { uploadsDir } from '@/lib/sqlite';
  * same name is overwritten. Max 2 GB (a SQLite file can be large).
  */
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   try {
     const form = await req.formData();
     const file = form.get('file');

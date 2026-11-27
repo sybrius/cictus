@@ -18,7 +18,8 @@ per-table validation, and a full run history.
 - **Sources:** SQL Server, MySQL, PostgreSQL, Oracle, SQLite (file)
 - **Targets:** NHost (Hasura), Supabase, generic PostgreSQL
 - **Stack:** Next.js 14 (App Router), TypeScript, Tailwind, `mssql`,
-  `mysql2`, `pg`, `oracledb`, `node:sqlite`, DuckDB for local run history
+  `mysql2`, `pg`, `oracledb`, `node:sqlite`, Turso (libsql) for run
+  history, schedules and accounts
 
 ## Features
 
@@ -67,10 +68,15 @@ per-table validation, and a full run history.
   (`data/connectors.json`, git-ignored) and are never sent back to the
   browser; the wizard sends only the connector id and the server
   resolves the credentials.
-- **Local DuckDB history** — every run is recorded in
-  `data/migrations.duckdb` (runs, per-table validation, errors) and shown
-  on the Dashboard and History pages. No server, no credentials — just
-  results.
+- **Turso history** — every run is recorded in your Turso database
+  (runs, per-table validation, errors) and shown on the Dashboard
+  and History pages. History, schedules and accounts share one
+  database, so they survive restarts and are the same from every
+  process that points at it.
+- **Sign-up & login** — a simple email + password front door
+  (bcrypt-hashed passwords, 7-day sessions in an httpOnly cookie).
+  Accounts live in Turso too. Anyone who can reach the app can sign
+  up, so run it on localhost — see [Sign in](#sign-in).
 - **Downloadable SQL** — generate the full migration script as a `.sql`
   file and review or run it yourself, without executing anything.
 
@@ -142,19 +148,22 @@ npm run build
 npm start
 ```
 
-Requirements: Node.js 20+ and npm. No database server is needed to run
-the app itself — it connects to your source and target databases over the
-network.
+Requirements: Node.js 20+ and npm, plus a Turso database — history,
+schedules and accounts live there (see [Configuration](#configuration)).
+No source/target database server is needed to run the app itself.
 
 ## Usage
 
-1. **Connectors (optional)** — save a SQL Server or MySQL source and an
+1. **Sign up / sign in** — the first visit asks you to create an
+   account (email + password); afterwards every page needs a login.
+   See [Sign in](#sign-in).
+2. **Connectors (optional)** — save a SQL Server or MySQL source and an
    NHost / Supabase / PostgreSQL target once, then pick them in the
    wizard instead of re-typing credentials.
-2. **New migration** — the wizard walks through source → target →
+3. **New migration** — the wizard walks through source → target →
    discover & select → type mapping → migrate → validate.
-3. **History** — every run, with per-table row counts and errors.
-4. **Dashboard** — totals across runs, recent migrations, connector status.
+4. **History** — every run, with per-table row counts and errors.
+5. **Dashboard** — totals across runs, recent migrations, connector status.
 
 ### The wizard in detail
 
@@ -178,6 +187,7 @@ network.
 
 | Variable | Purpose |
 |---|---|
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | **Required.** The Turso database for migration history, schedules and accounts. Create one at https://turso.tech, then copy the `libsql://` URL and a database token into `.env.local`. Without them, history is not recorded, schedules only live in memory, and nobody can sign in. |
 | `SQLSERVER_HOST` / `SQLSERVER_PORT` / `SQLSERVER_USER` / `SQLSERVER_PASSWORD` / `SQLSERVER_DATABASE` | Source SQL Server. The wizard collects these in the UI; the env vars are only defaults/documentation. |
 | `SQLSERVER_TRUST_CERT` | `true` if the server uses a self-signed certificate. |
 | `SQLSERVER_ENCRYPT` | `true` by default; set `false` for a local server if the test fails with "Could not connect (sequence)". |
@@ -245,7 +255,7 @@ pool and closes it afterwards.
   transfer is fast and re-runs stay idempotent. Spatial columns stay
   on the INSERT path, and a COPY failure falls back to INSERT.
 - **Scheduled migrations** (`src/lib/scheduler.ts`, `src/lib/cron.ts`) —
-  schedules live in the DuckDB store (`schedules` table) and are
+  schedules live in the Turso store (`schedules` table) and are
   created on the Schedules page from saved connectors. The scheduler
   starts with the server (`src/instrumentation.ts`, tick every minute)
   and runs due schedules through the same `executeMigration()` engine
@@ -268,7 +278,7 @@ pool and closes it afterwards.
   / failed) shows in Step 6 and in History. Supabase targets have no
   Hasura, so the option is not offered for them.
 - **Validation** — row count per table, source vs target, shown in Step 6
-  and recorded in the DuckDB history.
+  and recorded in the Turso history.
 
 ### View conversion
 
@@ -289,24 +299,53 @@ lowercase, but the tables and columns are created quoted (`"CallLog"`,
 `"WorkerId"`), so view references are quoted with the exact
 table/column names from the introspected schema.
 
-## Local DuckDB history
+## Sign in
 
-Every migration run is recorded in `data/migrations.duckdb` (tables
-`migrations`, `migration_tables`, `migration_errors`) — no server, no
-credentials, just results. Query it directly, e.g. with the DuckDB CLI:
+The app has a simple front door: sign up once with an email and
+password (`/signup`), then sign in (`/login`). Every page and every
+API route except `/api/auth/*` requires a session; an unauthenticated
+visit is redirected to `/login`.
+
+- Passwords are hashed with bcrypt and never stored or logged in plain
+  text. A login creates a random session token — only its SHA-256 hash
+  is stored in Turso (`sessions` table) — and the token itself lives
+  in an httpOnly cookie, so client-side JavaScript can never read it.
+  Sessions last 7 days; **Sign out** is in the sidebar.
+- Accounts live in the same Turso database as history
+  (`users` table, created automatically on first use).
+- **Scope:** there is no email verification, no password reset, no
+  rate limiting and no roles — anyone who can reach the app can sign
+  up. Run it on localhost (or behind your own auth) and treat the
+  first account as the owner.
+
+## Turso history, schedules & accounts
+
+Every migration run is recorded in your Turso database (tables
+`migrations`, `migration_tables`, `migration_errors` — created
+automatically on first use), alongside schedules (`schedules`) and
+accounts (`users`, `sessions`). Query it directly from the Turso
+dashboard or CLI, e.g.:
 
 ```sql
 SELECT started_at, source_name, target_name, target_type, rows_copied, errors_count
 FROM migrations ORDER BY started_at DESC;
 ```
 
-The `data/` directory is git-ignored: the DuckDB file and
-`data/connectors.json` live only on the machine that runs the app.
+`TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` go in `.env.local`
+(never committed); see `.env.example`. The `data/` directory is
+git-ignored: `data/connectors.json` lives only on the machine that
+runs the app.
 
-One DuckDB file can only be opened by one instance at a time, so the
-instance is kept as a process-wide singleton (`globalThis`) — in Next.js
-dev mode each route gets its own copy of a module, and a module-level
-singleton was opened twice, which failed with a file-lock error.
+If Turso is unavailable (env vars missing, or the database
+unreachable), the app keeps running in degraded mode: migrations
+still work, runs are simply not recorded, and schedules live only in
+memory until the server restarts — the Dashboard and History pages
+show a notice saying why. Accounts, however, need Turso: without it
+nobody can sign in, and the login page says so.
+
+> Migrating from the old local DuckDB history? The old
+> `data/migrations.duckdb` file does **not** carry over — history
+> starts fresh in Turso, and the file can be deleted.
 
 ## NHost notes
 
@@ -432,15 +471,15 @@ What the tool does not do, so you can plan around it:
   instances resolve via the SQL Browser (UDP 1434), and TCP/IP must
   be enabled on the server. MySQL row counts are exact `COUNT(*)`,
   which is slow on very large tables.
-- **One history file, one process.** The DuckDB history file
-  (`data/migrations.duckdb`) can only be opened by one process at a
-  time — a second dev server pointed at the same folder fails with a
-  file-lock error. Stop the other server (or `node.exe`) first.
-- **No authentication of its own.** The app holds database
-  credentials in memory for the duration of a request and stores
-  saved connectors on disk, so run it on localhost or behind your
-  own auth — do not expose it publicly without adding
-  authentication.
+- **History needs Turso.** Without `TURSO_DATABASE_URL` /
+  `TURSO_AUTH_TOKEN` in `.env.local`, runs are not recorded and
+  schedules only live in memory until the server restarts — the
+  Dashboard and History pages show a notice instead of data.
+- **Simple built-in auth, not a full identity system.** Email +
+  password sign-in with bcrypt hashes and 7-day sessions (see
+  [Sign in](#sign-in)). There is no email verification, password
+  reset, rate limiting or roles, and anyone who can reach the app
+  can sign up — run it on localhost or behind your own auth.
 
 ## Troubleshooting
 
@@ -507,25 +546,12 @@ Most common causes, in order, for a local server:
 - `ENOTFOUND / getaddrinfo` — the host name does not resolve from where
   the app runs; use `localhost` on the same machine, or the LAN IP /
   `host.docker.internal` from Docker / WSL.
-- `IO Error: Cannot open file …\data\migrations.duckdb` — another
-  `node.exe` (a stale dev server) holds the DuckDB file. End the extra
-  `node.exe` in Task Manager and restart `npm run dev`.
-- `Error: An error occurred while loading instrumentation hook: An
-  Application Control policy has blocked this file.
-  …\node_modules\@duckdb\node-bindings-win32-x64\duckdb.node` —
-  Windows Application Control (WDAC / AppLocker) is blocking the
-  DuckDB native module from loading. The app still starts — history
-  is just disabled (migrations work; runs are not recorded and
-  schedules live only in memory). To restore history, unblock the
-  file — in PowerShell as Administrator:
-  ```powershell
-  Unblock-File -Path "C:\Data\Projects\Cictus-ETL\cictus\node_modules\@duckdb\node-bindings-win32-x64\duckdb.node"
-  ```
-  then restart `npm run dev`. If the block persists, check Windows
-  Security → Protection history for the rule that fired, or ask your
-  IT admin to allow the file or the project folder in the Application
-  Control policy. Reinstalling dependencies does not fix a policy
-  block.
+- `TURSO_DATABASE_URL is not set` (or the Dashboard / History pages
+  show a "Turso is unavailable" notice) — the Turso env vars are
+  missing or wrong in `.env.local`. Copy them from the Turso
+  dashboard (Database → URL + Generate Token), restart `npm run dev`,
+  and reload. Until they are set, history is not recorded, schedules
+  only live in memory, and nobody can sign in.
 - A view fails with `syntax error at or near …` — the failed view's
   converted SQL is printed in the dev-server log on the `View failed:`
   line; check what construct was not converted and adjust the view or
@@ -551,8 +577,9 @@ created tables and views are tracked in the GraphQL API automatically.
 
 **Is it safe to expose the app publicly?**
 No. Run it on localhost or behind your own auth — it holds database
-credentials in memory for the duration of a request and has no built-in
-auth yet. Opt-in auth is on the roadmap.
+credentials in memory for the duration of a request, and the built-in
+sign-in is a simple local front door (no email verification, rate
+limiting or roles).
 
 **How do I run a migration on a schedule?**
 Use the Schedules page: pick a saved source → target pair, a table/view
@@ -572,19 +599,27 @@ run while the server is running.
 | `POST /api/migrate/ddl` | Return the generated SQL script (no execution). |
 | `GET /api/connectors` · `POST /api/connectors` · `DELETE /api/connectors` | Saved connectors (passwords never leave the server). |
 | `POST /api/connectors/test` | Test a saved connector. |
-| `GET /api/history` · `GET /api/history/[id]` | Migration run history from the local DuckDB store. |
+| `GET /api/history` · `GET /api/history/[id]` | Migration run history from the Turso store. |
+| `POST /api/auth/signup` · `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me` | Email + password accounts (bcrypt, 7-day sessions). |
 
 ## Project layout
 
 ```
 src/
   app/
-    page.tsx                    Dashboard
-    migrate/page.tsx            6-step wizard
-    connectors/page.tsx         Saved connectors
-    history/page.tsx            Run history
-    schedules/page.tsx          Scheduled migrations
+    (app)/
+      layout.tsx                Signed-in shell (sidebar + topbar)
+      page.tsx                  Dashboard
+      migrate/page.tsx          6-step wizard
+      connectors/page.tsx       Saved connectors
+      history/page.tsx          Run history
+      schedules/page.tsx        Scheduled migrations
+    (auth)/
+      layout.tsx                Centred sign-in shell
+      login/page.tsx            Sign in
+      signup/page.tsx           Create account
     layout.tsx / globals.css
+    api/auth/signup|login|logout|me/route.ts
     api/source/test|schema|diagnose|upload/route.ts
     api/target/test/route.ts
     api/migrate/route.ts        SSE streaming migration
@@ -609,6 +644,7 @@ src/
     MigrationLog.tsx    Auto-scrolling log
     ProgressBar.tsx
   instrumentation.ts    Starts the scheduler (dev/server runtime)
+  middleware.ts         Session gate (all pages + API except /api/auth/*)
   lib/
     type-map.ts         Source → Postgres type mapping + warnings
     sqlserver.ts        mssql pool, introspection, batched streaming
@@ -623,7 +659,9 @@ src/
     source-dispatch.ts  Dispatch on source type
     connectors.ts       Saved connectors (local JSON store)
     resolve-connector.ts Resolve connector id / form payload + source type
-    history-db.ts       DuckDB run history (globalThis singleton)
+    history-db.ts       Turso run history + schedules (via turso.ts)
+    turso.ts            Turso client, schema, degraded mode
+    auth.ts             Email + password accounts, sessions
     scheduler.ts        Schedule ticking + background runs
     cron.ts             5-field cron parsing + next-run calculation
     hasura.ts           Hasura Metadata API (pg_track_table)
@@ -670,6 +708,8 @@ Done so far:
 - [x] Scheduled / recurring migrations
 - [x] `COPY`-based bulk load for very large tables
 - [x] Hasura metadata API integration (auto-track tables after migration)
+- [x] Turso history, schedules & accounts (replacing local DuckDB)
+- [x] Simple sign-up / login (bcrypt, sessions)
 
 Next:
 
@@ -679,7 +719,6 @@ Next:
 - [ ] Unit-test suite (Vitest) wired into CI
 - [ ] Benchmarks vs pgloader on the sample dataset
 - [ ] `docs/` on GitHub Pages
-- [ ] Opt-in authentication for self-hosted use
 - [ ] Coordinated launch: Show HN, r/PostgreSQL, awesome-postgres
 
 ## Security
@@ -689,8 +728,9 @@ Next:
 - All API inputs are validated with `zod`; table identifiers are
   allow-list validated before being interpolated into SQL.
 - Run this app on localhost or behind your own auth — it holds database
-  credentials in memory for the duration of a request, so do not expose
-  it publicly without adding authentication.
+  credentials in memory for the duration of a request, and the built-in
+  sign-in is a simple local front door (no email verification, rate
+  limiting or roles).
 
 ## License
 

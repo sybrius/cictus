@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { generateMigrationScript } from '@/lib/ddl';
 import { resolveSource } from '@/lib/resolve-connector';
 import { introspectSource, viewDatabaseArg } from '@/lib/source-dispatch';
+import { requireAuth } from '@/lib/api-auth';
 
 const BodySchema = z.object({
   // Same as /api/migrate: raw form values accepted as-is, so a
@@ -21,6 +22,8 @@ const BodySchema = z.object({
  * returned script into a .sql file. Nothing is executed by this route.
  */
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   const parsed = BodySchema.safeParse(body);
   if (!parsed.success) {

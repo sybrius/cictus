@@ -4,6 +4,7 @@ import { executeMigration, resolveSourceConfig, type MigrationJob, type Progress
 import { resolveSource, resolveTarget } from '@/lib/resolve-connector';
 import { parseSourceConfig } from '@/lib/source-dispatch';
 import { hasuraConfigForConnector } from '@/lib/hasura';
+import { requireAuth } from '@/lib/api-auth';
 
 const BodySchema = z.object({
   // Raw form values, accepted as-is: when a connector id is given,
@@ -23,7 +24,7 @@ const BodySchema = z.object({
   dropExisting: z.boolean().default(false),
   useCopy: z.boolean().default(true),
   trackInHasura: z.boolean().default(false),
-  // Display names for the local DuckDB history record (not credentials).
+  // Display names for the Turso history record (not credentials).
   sourceName: z.string().optional(),
   targetName: z.string().optional(),
   targetType: z.string().optional(),
@@ -44,6 +45,8 @@ type OutEvent =
  * the browser stream, and sends the final summary.
  */
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   const parsed = BodySchema.safeParse(body);
   if (!parsed.success) {
@@ -109,7 +112,7 @@ export async function POST(req: Request) {
       // reported "network error" instead of the per-table
       // skip-and-continue behaviour. Now a dead stream just stops
       // receiving events; the migration keeps going server-side and
-      // its result is still recorded in the DuckDB history.
+      // its result is still recorded in the Turso history.
       let streamAlive = true;
       const send = (e: OutEvent) => {
         if (!streamAlive) return;

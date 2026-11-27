@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server';
 import { resolveSource } from '@/lib/resolve-connector';
 import { parseSourceConfig, testSourceConnection } from '@/lib/source-dispatch';
+import { requireAuth } from '@/lib/api-auth';
 
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   try {
     const { config, sourceType } = resolveSource((body ?? {}) as Record<string, unknown>);

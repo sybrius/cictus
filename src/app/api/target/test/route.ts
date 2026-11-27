@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server';
 import { TargetConfigSchema, testTargetConnection } from '@/lib/postgres';
 import { resolveTarget } from '@/lib/resolve-connector';
+import { requireAuth } from '@/lib/api-auth';
 
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   try {
     const { connectionString } = resolveTarget((body ?? {}) as Record<string, unknown>);

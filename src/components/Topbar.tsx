@@ -9,6 +9,7 @@ const TITLES: Record<string, { title: string; crumb: string }> = {
   '/migrate': { title: 'New migration', crumb: 'Migrate' },
   '/history': { title: 'Run history', crumb: 'Migrate' },
   '/connectors': { title: 'Connectors', crumb: 'Connections' },
+  '/schedules': { title: 'Schedules', crumb: 'Migrate' },
 };
 
 export function Topbar() {
@@ -27,7 +28,7 @@ export function Topbar() {
         <div className="flex shrink-0 items-center gap-2.5">
           <span className="hidden items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 sm:inline-flex">
             <span className="h-1.5 w-1.5 animate-pulse_soft rounded-full bg-emerald-500" />
-            Local · DuckDB history
+            Turso history
           </span>
           {pathname !== '/migrate' && (
             <Link

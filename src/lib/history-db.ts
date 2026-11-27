@@ -1,43 +1,31 @@
-import fs from 'fs';
-import path from 'path';
+import { withTurso, tursoUnavailableReason } from './turso';
 
 /**
- * Local DuckDB store for migration history.
+ * Migration history and schedules, stored in Turso (libsql/SQLite).
  *
- * Every migration run is recorded here — on this machine only, in
- * `data/migrations.duckdb` — so the Dashboard and History pages can
- * show past runs, row counts, per-table validation and errors without
- * touching the source or target databases again.
+ * Every migration run is recorded here — in the Turso database from
+ * `TURSO_DATABASE_URL` — so the Dashboard and History pages can show
+ * past runs, row counts, per-table validation and errors without
+ * touching the source or target databases again. Schedules live in
+ * the same database. This used to be a local DuckDB file
+ * (`data/migrations.duckdb`); Turso replaces it so history survives
+ * restarts, is shared by every process pointing at the same database,
+ * and has no single-writer file lock and no native module to be
+ * blocked by a Windows Application Control policy.
  *
- * Why DuckDB: it is a single local file, needs no server, and the
- * history can be queried with plain SQL (e.g. from the DuckDB CLI)
- * for ad-hoc reporting. It stores results only — never credentials.
+ * The old local history file does NOT carry over — history starts
+ * fresh in Turso. The file can be deleted once the switch is done.
  *
- * One DuckDB file can only be opened by ONE instance at a time
- * (single-writer lock). The instance is therefore kept as a
- * process-wide singleton on `globalThis` — NOT in a module-level
- * variable. In Next.js dev mode each route handler gets its own
- * copy of this module, so a module-level singleton was opened once
- * by the migrate route and once by the history route, and the
- * second open failed with: IO Error: Cannot open file
- * "...\data\migrations.duckdb": The process cannot access the file
- * because it is being used by another process. `globalThis` is
- * shared across all route bundles in the same process, so the file
- * is opened exactly once. Each operation still gets its own
- * connection from that instance (closed afterwards), so concurrent
- * reads — e.g. the History page loading runs and stats together —
- * do not share one connection.
+ * Degraded mode: when Turso is unavailable (env vars missing, or the
+ * database unreachable), every function below falls back instead of
+ * throwing — runs are not recorded, `listRuns` returns `[]`, and
+ * schedules live only in memory until the server restarts. Migrations
+ * themselves still work. The History page shows a notice in that
+ * case (see `historyUnavailableReason()`).
  *
- * Degraded mode: the DuckDB native module (`duckdb.node`) is loaded
- * lazily, on first use — never at import time. If the machine blocks
- * the native file (e.g. a Windows Application Control policy), the
- * import fails and the app keeps running without persisted history:
- * migrations still work, runs are simply not recorded, and schedules
- * live only in memory until the server restarts. The History page
- * shows a notice in that case (see `historyUnavailableReason()`).
- * This matters because a failed static import would otherwise kill
- * the whole server at startup — the instrumentation hook imports
- * the scheduler, which imports this module.
+ * All queries are parameterised — values are never interpolated
+ * into SQL. Timestamps are ISO strings (TEXT), booleans are 1/0
+ * (INTEGER), counts are INTEGER.
  */
 
 export interface MigrationRun {
@@ -101,216 +89,29 @@ export interface MigrationError {
   message: string;
 }
 
-function dbPath(): string {
-  return process.env.HISTORY_DB_PATH || path.join(process.cwd(), 'data', 'migrations.duckdb');
+/** Non-null when Turso is unavailable in this process. Read it after
+ *  a history call (e.g. listRuns) so the load has been attempted. */
+export function historyUnavailableReason(): string | null {
+  return tursoUnavailableReason();
 }
 
-function esc(v: string): string {
-  return `'${v.replace(/'/g, "''")}'`;
+/** SQLite stores booleans as 1/0; libsql returns them as numbers. */
+function toBool(v: unknown, defaultValue: boolean): boolean {
+  if (v === 1 || v === true) return true;
+  if (v === 0 || v === false) return false;
+  return defaultValue;
 }
 
-/** DuckDB returns BIGINT as JS BigInt and timestamps as
- *  DuckDBTimestampTZValue (with a BigInt `micros` field) — neither
- *  survives JSON.stringify, so normalise row objects before returning. */
-function normaliseRows<T extends Record<string, unknown>>(rows: T[]): T[] {
-  return rows.map((row) => {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(row)) {
-      if (typeof v === 'bigint') out[k] = Number(v);
-      else if (v instanceof Date) out[k] = v.toISOString();
-      else if (v && typeof v === 'object' && 'micros' in v && typeof (v as { micros: unknown }).micros === 'bigint') {
-        // DuckDBTimestampTZValue / DuckDBTimestampValue: micros since epoch.
-        out[k] = new Date(Number((v as { micros: bigint }).micros) / 1000).toISOString();
-      } else if (v && typeof v === 'object' && 'days' in v && typeof (v as { days: unknown }).days === 'number') {
-        // DuckDBDateValue: days since epoch.
-        out[k] = new Date((v as { days: number }).days * 86400000).toISOString().slice(0, 10);
-      } else out[k] = v;
-    }
-    return out as T;
-  });
-}
-
-type DuckDBModule = typeof import('@duckdb/node-api');
-type DuckDBInstanceType = Awaited<ReturnType<DuckDBModule['DuckDBInstance']['create']>>;
-type DuckDBConnectionType = Awaited<ReturnType<DuckDBInstanceType['connect']>>;
-
-interface DuckDbGlobal {
-  instancePromise?: Promise<DuckDBInstanceType> | null;
-  initPromise?: Promise<void> | null;
-  /** Cached result of the lazy native-module import (null = failed). */
-  modulePromise?: Promise<DuckDBModule | null> | null;
-  /** Set when the native module failed to load; null while untested. */
-  moduleError?: string | null;
-  /** Schedules kept in memory while DuckDB is unavailable. */
+interface MemoryStore {
   memorySchedules?: Map<string, Schedule>;
 }
-const duckDbGlobal = globalThis as typeof globalThis & { __cictusDuckDb?: DuckDbGlobal };
-
-function getStore(): DuckDbGlobal {
-  if (!duckDbGlobal.__cictusDuckDb) duckDbGlobal.__cictusDuckDb = {};
-  return duckDbGlobal.__cictusDuckDb;
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** Open the file, retrying briefly if another process is momentarily
- *  holding the lock (e.g. a just-stopped dev server still closing).
- *  If it stays locked, fail with a message that says what to do
- *  instead of the raw DuckDB IO error. */
-/** Load the DuckDB native module lazily, on first use — never at
- * import time. If the file is blocked (e.g. a Windows Application
- * Control policy refuses `duckdb.node`), the import rejects, the
- * reason is cached on the shared store, and every history/schedule
- * call degrades gracefully instead of crashing the server. */
-async function loadDuckDbModule(): Promise<DuckDBModule | null> {
-  const store = getStore();
-  if (store.modulePromise) return store.modulePromise;
-  store.modulePromise = import('@duckdb/node-api')
-    .then((mod) => {
-      store.moduleError = null;
-      return mod;
-    })
-    .catch((e) => {
-      // Keep only the first line — the raw message can carry a long
-      // Node require stack that would look awful in the UI banner.
-      const msg = (e instanceof Error ? e.message : String(e)).split('\n')[0];
-      store.moduleError = msg;
-      console.warn(
-        '[cictus] DuckDB native module could not be loaded — migration history will not be recorded ' +
-          'and schedules will only live in memory until the server restarts. Migrations themselves ' +
-          `still work. Reason: ${msg}`,
-      );
-      return null;
-    });
-  return store.modulePromise;
-}
-
-/** Non-null when the DuckDB native module failed to load in this
- * process. Read it after a history call (e.g. listRuns) so the
- * load has been attempted. */
-export function historyUnavailableReason(): string | null {
-  return getStore().moduleError ?? null;
-}
+const memoryGlobal = globalThis as typeof globalThis & { __cictusHistoryMemory?: MemoryStore };
 
 function getMemorySchedules(): Map<string, Schedule> {
-  const store = getStore();
+  if (!memoryGlobal.__cictusHistoryMemory) memoryGlobal.__cictusHistoryMemory = {};
+  const store = memoryGlobal.__cictusHistoryMemory;
   if (!store.memorySchedules) store.memorySchedules = new Map();
   return store.memorySchedules;
-}
-
-async function openWithRetry(mod: DuckDBModule, file: string, attempts = 5): Promise<DuckDBInstanceType> {
-  let last: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await mod.DuckDBInstance.create(file);
-    } catch (e) {
-      last = e;
-      const msg = String((e as Error)?.message ?? e);
-      if (!/already open|IO Error|lock|cannot access/i.test(msg)) throw e;
-      await sleep(300 * (i + 1));
-    }
-  }
-  throw new Error(
-    `Cannot open the migration history file ${file}: it is locked by another process. ` +
-      `Stop the other dev server (another "npm run dev" or node.exe still running) and reload the page. ` +
-      `Original error: ${String((last as Error)?.message ?? last)}`,
-  );
-}
-
-/** The shared instance, or null when the native module could not be
- * loaded (degraded mode — callers fall back, see withConnection). */
-async function getInstance(): Promise<DuckDBInstanceType | null> {
-  const mod = await loadDuckDbModule();
-  if (!mod) return null;
-  const store = getStore();
-  if (!store.instancePromise) {
-    const dir = path.dirname(dbPath());
-    fs.mkdirSync(dir, { recursive: true });
-    store.instancePromise = openWithRetry(mod, dbPath()).catch((e) => {
-      store.instancePromise = null; // allow a later call to retry
-      throw e;
-    });
-  }
-  return store.instancePromise;
-}
-
-async function ensureSchema(conn: DuckDBConnectionType): Promise<void> {
-  await conn.run(`CREATE TABLE IF NOT EXISTS migrations (
-      id VARCHAR PRIMARY KEY,
-      started_at TIMESTAMPTZ,
-      finished_at TIMESTAMPTZ,
-      status VARCHAR,
-      source_name VARCHAR,
-      target_name VARCHAR,
-      target_type VARCHAR,
-      tables_total INTEGER,
-      tables_succeeded INTEGER,
-      rows_copied BIGINT,
-      views_created INTEGER,
-      views_total INTEGER,
-      errors_count INTEGER
-    )`);
-  await conn.run(`CREATE TABLE IF NOT EXISTS migration_tables (
-      run_id VARCHAR,
-      table_name VARCHAR,
-      source_rows BIGINT,
-      target_rows BIGINT,
-      matched BOOLEAN,
-      status VARCHAR
-    )`);
-  await conn.run(`CREATE TABLE IF NOT EXISTS migration_errors (
-      run_id VARCHAR,
-      scope VARCHAR,
-      message VARCHAR
-    )`);
-  // Columns added after the first release — keep them optional so
-  // older history files pick them up without a migration script.
-  await conn.run(`ALTER TABLE migrations ADD COLUMN IF NOT EXISTS trigger VARCHAR`);
-  await conn.run(`ALTER TABLE migrations ADD COLUMN IF NOT EXISTS run_name VARCHAR`);
-  await conn.run(`ALTER TABLE migrations ADD COLUMN IF NOT EXISTS schedule_id VARCHAR`);
-  await conn.run(`CREATE TABLE IF NOT EXISTS schedules (
-      id VARCHAR PRIMARY KEY,
-      name VARCHAR,
-      source_connector_id VARCHAR,
-      target_connector_id VARCHAR,
-      tables_json VARCHAR,
-      views_json VARCHAR,
-      include_data BOOLEAN,
-      drop_existing BOOLEAN,
-      use_copy BOOLEAN,
-      cron VARCHAR,
-      enabled BOOLEAN,
-      last_run_at TIMESTAMPTZ,
-      last_status VARCHAR,
-      last_run_id VARCHAR,
-      next_run_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ
-    )`);
-  await conn.run(`ALTER TABLE schedules ADD COLUMN IF NOT EXISTS track_in_hasura BOOLEAN`);
-}
-
-/** Run `fn` on a fresh connection from the shared instance, creating
- *  the tables once. The connection is always closed afterwards.
- * Returns null when DuckDB is unavailable (degraded mode) — callers
- * fall back instead of throwing, so a blocked native module never
- * breaks a migration or a page load. */
-async function withConnection<T>(fn: (conn: DuckDBConnectionType) => Promise<T>): Promise<T | null> {
-  const instance = await getInstance();
-  if (!instance) return null;
-  const conn = await instance.connect();
-  try {
-    const store = getStore();
-    if (!store.initPromise) {
-      store.initPromise = ensureSchema(conn).catch((e) => {
-        store.initPromise = null;
-        throw e;
-      });
-    }
-    await store.initPromise;
-    return await fn(conn);
-  } finally {
-    conn.closeSync();
-  }
 }
 
 export async function recordRunStart(run: {
@@ -324,10 +125,26 @@ export async function recordRunStart(run: {
   runName?: string | null;
   scheduleId?: string | null;
 }): Promise<void> {
-  await withConnection(async (conn) => {
-    await conn.run(
-      `INSERT INTO migrations VALUES (${esc(run.id)}, now(), NULL, 'running', ${esc(run.sourceName)}, ${esc(run.targetName)}, ${esc(run.targetType)}, ${run.tablesTotal}, 0, 0, 0, ${run.viewsTotal}, 0, ${esc(run.trigger ?? 'manual')}, ${run.runName ? esc(run.runName) : 'NULL'}, ${run.scheduleId ? esc(run.scheduleId) : 'NULL'})`,
-    );
+  await withTurso(async (client) => {
+    await client.execute({
+      sql: `INSERT INTO migrations
+        (id, started_at, finished_at, status, source_name, target_name, target_type,
+         tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
+         trigger, run_name, schedule_id)
+        VALUES (?, ?, NULL, 'running', ?, ?, ?, ?, 0, 0, 0, ?, 0, ?, ?, ?)`,
+      args: [
+        run.id,
+        new Date().toISOString(),
+        run.sourceName,
+        run.targetName,
+        run.targetType,
+        run.tablesTotal,
+        run.viewsTotal,
+        run.trigger ?? 'manual',
+        run.runName ?? null,
+        run.scheduleId ?? null,
+      ],
+    });
   });
 }
 
@@ -341,35 +158,47 @@ export async function recordRunFinish(run: {
   tables: MigrationTableResult[];
   errors: { scope: string; message: string }[];
 }): Promise<void> {
-  await withConnection(async (conn) => {
-    await conn.run(
-      `UPDATE migrations SET finished_at = now(), status = ${esc(run.status)},
-       tables_succeeded = ${run.tablesSucceeded}, rows_copied = ${run.rowsCopied},
-       views_created = ${run.viewsCreated}, errors_count = ${run.errorsCount}
-       WHERE id = ${esc(run.id)}`,
-    );
+  await withTurso(async (client) => {
+    await client.execute({
+      sql: `UPDATE migrations SET finished_at = ?, status = ?,
+        tables_succeeded = ?, rows_copied = ?, views_created = ?, errors_count = ?
+        WHERE id = ?`,
+      args: [
+        new Date().toISOString(),
+        run.status,
+        run.tablesSucceeded,
+        run.rowsCopied,
+        run.viewsCreated,
+        run.errorsCount,
+        run.id,
+      ],
+    });
     for (const t of run.tables) {
-      await conn.run(
-        `INSERT INTO migration_tables VALUES (${esc(run.id)}, ${esc(t.tableName)}, ${t.sourceRows}, ${t.targetRows}, ${t.matched}, ${esc(t.status)})`,
-      );
+      await client.execute({
+        sql: `INSERT INTO migration_tables VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [run.id, t.tableName, t.sourceRows, t.targetRows, t.matched ? 1 : 0, t.status],
+      });
     }
     for (const e of run.errors) {
-      await conn.run(
-        `INSERT INTO migration_errors VALUES (${esc(run.id)}, ${esc(e.scope)}, ${esc(e.message)})`,
-      );
+      await client.execute({
+        sql: `INSERT INTO migration_errors VALUES (?, ?, ?)`,
+        args: [run.id, e.scope, e.message],
+      });
     }
   });
 }
 
+const RUN_COLS = `id, started_at, finished_at, status, source_name, target_name, target_type,
+  tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
+  trigger, run_name, schedule_id`;
+
 export async function listRuns(limit = 50): Promise<MigrationRun[]> {
-  const rows = await withConnection(async (conn) => {
-    const reader = await conn.runAndReadAll(
-      `SELECT id, started_at, finished_at, status, source_name, target_name, target_type,
-       tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
-       trigger, run_name, schedule_id
-       FROM migrations ORDER BY started_at DESC LIMIT ${limit}`,
-    );
-    return normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]) as unknown as MigrationRun[];
+  const rows = await withTurso(async (client) => {
+    const result = await client.execute({
+      sql: `SELECT ${RUN_COLS} FROM migrations ORDER BY started_at DESC LIMIT ?`,
+      args: [limit],
+    });
+    return result.rows as unknown as MigrationRun[];
   });
   return rows ?? [];
 }
@@ -379,24 +208,30 @@ export async function getRun(id: string): Promise<{
   tables: MigrationTableResult[];
   errors: MigrationError[];
 }> {
-  const result = await withConnection(async (conn) => {
-    const runs = await conn.runAndReadAll(
-      `SELECT id, started_at, finished_at, status, source_name, target_name, target_type,
-       tables_total, tables_succeeded, rows_copied, views_created, views_total, errors_count,
-       trigger, run_name, schedule_id
-       FROM migrations WHERE id = ${esc(id)}`,
-    );
-    const rows = runs.getRowObjects() as unknown as MigrationRun[];
-    const tables = await conn.runAndReadAll(
-      `SELECT run_id, table_name, source_rows, target_rows, matched, status FROM migration_tables WHERE run_id = ${esc(id)} ORDER BY table_name`,
-    );
-    const errors = await conn.runAndReadAll(
-      `SELECT run_id, scope, message FROM migration_errors WHERE run_id = ${esc(id)}`,
-    );
+  const result = await withTurso(async (client) => {
+    const runs = await client.execute({
+      sql: `SELECT ${RUN_COLS} FROM migrations WHERE id = ?`,
+      args: [id],
+    });
+    const tables = await client.execute({
+      sql: `SELECT run_id, table_name, source_rows, target_rows, matched, status FROM migration_tables WHERE run_id = ? ORDER BY table_name`,
+      args: [id],
+    });
+    const errors = await client.execute({
+      sql: `SELECT run_id, scope, message FROM migration_errors WHERE run_id = ?`,
+      args: [id],
+    });
     return {
-      run: rows[0] ? normaliseRows(rows as unknown as Record<string, unknown>[])[0] as unknown as MigrationRun : null,
-      tables: normaliseRows(tables.getRowObjects() as unknown as Record<string, unknown>[]) as unknown as MigrationTableResult[],
-      errors: normaliseRows(errors.getRowObjects() as unknown as Record<string, unknown>[]) as unknown as MigrationError[],
+      run: (runs.rows[0] as unknown as MigrationRun) ?? null,
+      tables: (tables.rows as unknown as Record<string, unknown>[]).map((t) => ({
+        runId: String(t.run_id ?? ''),
+        tableName: String(t.table_name ?? ''),
+        sourceRows: Number(t.source_rows ?? 0),
+        targetRows: Number(t.target_rows ?? 0),
+        matched: t.matched === 1 || t.matched === true,
+        status: String(t.status ?? ''),
+      })),
+      errors: errors.rows as unknown as MigrationError[],
     };
   });
   return result ?? { run: null, tables: [], errors: [] };
@@ -410,8 +245,8 @@ export async function historyStats(): Promise<{
   totalErrors: number;
   lastRunAt: string | null;
 }> {
-  const stats = await withConnection(async (conn) => {
-    const reader = await conn.runAndReadAll(
+  const stats = await withTurso(async (client) => {
+    const result = await client.execute(
       `SELECT count(*) AS total_runs,
        sum(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
        coalesce(sum(rows_copied), 0) AS total_rows,
@@ -420,7 +255,7 @@ export async function historyStats(): Promise<{
        max(started_at) AS last_run_at
        FROM migrations`,
     );
-    const row = normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[])[0] as unknown as Record<string, unknown>;
+    const row = result.rows[0] as unknown as Record<string, unknown>;
     return {
       totalRuns: Number(row.total_runs ?? 0),
       completedRuns: Number(row.completed_runs ?? 0),
@@ -452,12 +287,12 @@ function scheduleRowToSchedule(row: Record<string, unknown>): Schedule {
     targetConnectorId: String(row.target_connector_id ?? ''),
     tables: parseList(row.tables_json),
     views: parseList(row.views_json),
-    includeData: row.include_data !== false,
-    dropExisting: row.drop_existing === true,
-    useCopy: row.use_copy !== false,
-    trackInHasura: row.track_in_hasura === true,
+    includeData: toBool(row.include_data, true),
+    dropExisting: toBool(row.drop_existing, false),
+    useCopy: toBool(row.use_copy, true),
+    trackInHasura: toBool(row.track_in_hasura, false),
     cron: String(row.cron ?? ''),
-    enabled: row.enabled !== false,
+    enabled: toBool(row.enabled, true),
     lastRunAt: row.last_run_at ? String(row.last_run_at) : null,
     lastStatus: row.last_status ? String(row.last_status) : null,
     lastRunId: row.last_run_id ? String(row.last_run_id) : null,
@@ -471,21 +306,24 @@ const SCHEDULE_COLS = `id, name, source_connector_id, target_connector_id, table
   next_run_at, created_at`;
 
 export async function listSchedules(): Promise<Schedule[]> {
-  const rows = await withConnection(async (conn) => {
-    const reader = await conn.runAndReadAll(`SELECT ${SCHEDULE_COLS} FROM schedules ORDER BY created_at DESC`);
-    return normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]).map(scheduleRowToSchedule);
+  const rows = await withTurso(async (client) => {
+    const result = await client.execute(`SELECT ${SCHEDULE_COLS} FROM schedules ORDER BY created_at DESC`);
+    return (result.rows as unknown as Record<string, unknown>[]).map(scheduleRowToSchedule);
   });
   if (rows !== null) return rows;
-  // Degraded mode: schedules created while DuckDB is unavailable live
+  // Degraded mode: schedules created while Turso is unavailable live
   // only in memory, until the server restarts.
   return [...getMemorySchedules().values()].sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 }
 
 export async function getSchedule(id: string): Promise<Schedule | null> {
-  const found = await withConnection(async (conn) => {
-    const reader = await conn.runAndReadAll(`SELECT ${SCHEDULE_COLS} FROM schedules WHERE id = ${esc(id)}`);
-    const rows = normaliseRows(reader.getRowObjects() as unknown as Record<string, unknown>[]);
-    return rows[0] ? scheduleRowToSchedule(rows[0]) : null;
+  const found = await withTurso(async (client) => {
+    const result = await client.execute({
+      sql: `SELECT ${SCHEDULE_COLS} FROM schedules WHERE id = ?`,
+      args: [id],
+    });
+    const row = result.rows[0] as unknown as Record<string, unknown> | undefined;
+    return row ? scheduleRowToSchedule(row) : null;
   });
   return found ?? getMemorySchedules().get(id) ?? null;
 }
@@ -493,27 +331,41 @@ export async function getSchedule(id: string): Promise<Schedule | null> {
 /** Insert or replace a schedule (delete + insert keeps it simple and
  *  avoids relying on ON CONFLICT support). */
 export async function saveSchedule(s: Schedule): Promise<void> {
-  const ran = await withConnection(async (conn) => {
-    await conn.run(`DELETE FROM schedules WHERE id = ${esc(s.id)}`);
-    await conn.run(
-      `INSERT INTO schedules
-       (id, name, source_connector_id, target_connector_id, tables_json, views_json,
-        include_data, drop_existing, use_copy, track_in_hasura, cron, enabled,
-        last_run_at, last_status, last_run_id, next_run_at, created_at)
-       VALUES (${esc(s.id)}, ${esc(s.name)}, ${esc(s.sourceConnectorId)}, ${esc(s.targetConnectorId)},
-       ${esc(JSON.stringify(s.tables))}, ${esc(JSON.stringify(s.views))},
-       ${s.includeData}, ${s.dropExisting}, ${s.useCopy}, ${s.trackInHasura ?? false}, ${esc(s.cron)}, ${s.enabled},
-       ${s.lastRunAt ? esc(s.lastRunAt) : 'NULL'}, ${s.lastStatus ? esc(s.lastStatus) : 'NULL'},
-       ${s.lastRunId ? esc(s.lastRunId) : 'NULL'}, ${s.nextRunAt ? esc(s.nextRunAt) : 'NULL'},
-       ${s.createdAt ? esc(s.createdAt) : 'now()'})`,
-    );
+  const ran = await withTurso(async (client) => {
+    await client.execute({ sql: `DELETE FROM schedules WHERE id = ?`, args: [s.id] });
+    await client.execute({
+      sql: `INSERT INTO schedules
+        (id, name, source_connector_id, target_connector_id, tables_json, views_json,
+         include_data, drop_existing, use_copy, track_in_hasura, cron, enabled,
+         last_run_at, last_status, last_run_id, next_run_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        s.id,
+        s.name,
+        s.sourceConnectorId,
+        s.targetConnectorId,
+        JSON.stringify(s.tables),
+        JSON.stringify(s.views),
+        s.includeData ? 1 : 0,
+        s.dropExisting ? 1 : 0,
+        s.useCopy ? 1 : 0,
+        s.trackInHasura ? 1 : 0,
+        s.cron,
+        s.enabled ? 1 : 0,
+        s.lastRunAt ?? null,
+        s.lastStatus ?? null,
+        s.lastRunId ?? null,
+        s.nextRunAt ?? null,
+        s.createdAt || new Date().toISOString(),
+      ],
+    });
   });
   if (ran === null) getMemorySchedules().set(s.id, s);
 }
 
 export async function deleteSchedule(id: string): Promise<void> {
-  const ran = await withConnection(async (conn) => {
-    await conn.run(`DELETE FROM schedules WHERE id = ${esc(id)}`);
+  const ran = await withTurso(async (client) => {
+    await client.execute({ sql: `DELETE FROM schedules WHERE id = ?`, args: [id] });
   });
   if (ran === null) getMemorySchedules().delete(id);
 }
@@ -525,15 +377,32 @@ export async function updateScheduleRun(id: string, patch: {
   nextRunAt?: string | null;
   enabled?: boolean;
 }): Promise<void> {
-  const ran = await withConnection(async (conn) => {
+  const ran = await withTurso(async (client) => {
     const sets: string[] = [];
-    if (patch.lastRunAt !== undefined) sets.push(`last_run_at = ${patch.lastRunAt ? esc(patch.lastRunAt) : 'NULL'}`);
-    if (patch.lastStatus !== undefined) sets.push(`last_status = ${patch.lastStatus ? esc(patch.lastStatus) : 'NULL'}`);
-    if (patch.lastRunId !== undefined) sets.push(`last_run_id = ${patch.lastRunId ? esc(patch.lastRunId) : 'NULL'}`);
-    if (patch.nextRunAt !== undefined) sets.push(`next_run_at = ${patch.nextRunAt ? esc(patch.nextRunAt) : 'NULL'}`);
-    if (patch.enabled !== undefined) sets.push(`enabled = ${patch.enabled}`);
+    const args: (string | number | null)[] = [];
+    if (patch.lastRunAt !== undefined) {
+      sets.push(`last_run_at = ?`);
+      args.push(patch.lastRunAt);
+    }
+    if (patch.lastStatus !== undefined) {
+      sets.push(`last_status = ?`);
+      args.push(patch.lastStatus);
+    }
+    if (patch.lastRunId !== undefined) {
+      sets.push(`last_run_id = ?`);
+      args.push(patch.lastRunId);
+    }
+    if (patch.nextRunAt !== undefined) {
+      sets.push(`next_run_at = ?`);
+      args.push(patch.nextRunAt);
+    }
+    if (patch.enabled !== undefined) {
+      sets.push(`enabled = ?`);
+      args.push(patch.enabled ? 1 : 0);
+    }
     if (!sets.length) return;
-    await conn.run(`UPDATE schedules SET ${sets.join(', ')} WHERE id = ${esc(id)}`);
+    args.push(id);
+    await client.execute({ sql: `UPDATE schedules SET ${sets.join(', ')} WHERE id = ?`, args });
   });
   if (ran === null) {
     const s = getMemorySchedules().get(id);

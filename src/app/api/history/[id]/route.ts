@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getRun } from '@/lib/history-db';
+import { requireAuth } from '@/lib/api-auth';
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   try {
     const { run, tables, errors } = await getRun(params.id);
     if (!run) return NextResponse.json({ ok: false, error: 'Run not found' }, { status: 404 });

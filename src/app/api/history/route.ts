@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { listRuns, historyStats, historyUnavailableReason } from '@/lib/history-db';
+import { requireAuth } from '@/lib/api-auth';
 
 function serialise(run: Record<string, unknown>) {
   return {
@@ -10,6 +11,8 @@ function serialise(run: Record<string, unknown>) {
 }
 
 export async function GET() {
+  const auth = await requireAuth();
+  if (auth) return auth;
   try {
     const [runs, stats] = await Promise.all([listRuns(50), historyStats()]);
     const reason = historyUnavailableReason();

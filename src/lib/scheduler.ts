@@ -14,7 +14,7 @@ import { nextRunAfter } from './cron';
  * minute, and runs each enabled schedule whose next run is due.
  * A run is the same executeMigration() engine the wizard uses, so
  * scheduled runs get the same phases, COPY bulk load, FK-after-data
- * behaviour and DuckDB history record (trigger: 'schedule').
+ * behaviour and Turso history record (trigger: 'schedule').
  *
  * The scheduler only runs while the dev server is running — this is
  * a local tool, so a schedule cannot fire while the machine or the

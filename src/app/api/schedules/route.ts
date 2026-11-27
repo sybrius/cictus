@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { listSchedules, saveSchedule, type Schedule } from '@/lib/history-db';
 import { loadConnectors } from '@/lib/connectors';
 import { validateCron, nextRunAfter } from '@/lib/cron';
+import { requireAuth } from '@/lib/api-auth';
 
 const ScheduleBodySchema = z.object({
   id: z.string().optional(),
@@ -21,6 +22,8 @@ const ScheduleBodySchema = z.object({
 });
 
 export async function GET() {
+  const auth = await requireAuth();
+  if (auth) return auth;
   try {
     const [schedules, connectors] = await Promise.all([listSchedules(), Promise.resolve(loadConnectors())]);
     const names = new Map(connectors.map((c) => [c.id, c.name]));
@@ -45,6 +48,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   const parsed = ScheduleBodySchema.safeParse(body);
   if (!parsed.success) {

@@ -1,11 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getSchedule } from '@/lib/history-db';
 import { isScheduleRunning, runSchedule } from '@/lib/scheduler';
+import { requireAuth } from '@/lib/api-auth';
 
 /** POST /api/schedules/:id/run — start a run now, in the background.
  *  Returns immediately; the result lands in History (trigger:
  *  'schedule') and on the schedule's last-run fields. */
 export async function POST(_req: Request, { params }: { params: { id: string } }) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   try {
     const schedule = await getSchedule(params.id);
     if (!schedule) return NextResponse.json({ ok: false, error: 'Schedule not found' }, { status: 404 });

@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
 import { deleteSchedule, getSchedule, updateScheduleRun } from '@/lib/history-db';
 import { nextRunAfter } from '@/lib/cron';
+import { requireAuth } from '@/lib/api-auth';
 
 /** DELETE /api/schedules/:id — remove a schedule. */
 export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   try {
     await deleteSchedule(params.id);
     return NextResponse.json({ ok: true });
@@ -14,6 +17,8 @@ export async function DELETE(_req: Request, { params }: { params: { id: string }
 
 /** PATCH /api/schedules/:id — enable / disable a schedule. */
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
+  const auth = await requireAuth();
+  if (auth) return auth;
   const body = await req.json().catch(() => null);
   if (typeof body?.enabled !== 'boolean') {
     return NextResponse.json({ ok: false, error: 'enabled must be true or false' }, { status: 400 });
